@@ -17,17 +17,19 @@ def _write_pipeline_plan(
     *,
     name: str,
     key_hyperparameters: dict[str, object],
+    toggles: dict[str, object] | None = None,
 ) -> Path:
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(
         json.dumps(
             {
+                "toggles": toggles or {},
                 "pipelines": [
                     {
                         "name": name,
                         "key_hyperparameters": key_hyperparameters,
                     }
-                ]
+                ],
             }
         ),
         encoding="utf-8",
@@ -89,6 +91,75 @@ def test_validate_local_kernel_plan_runtime_hyperparameters_rejects_sequences(tm
     )
 
     with pytest.raises(KernelFailedError, match="unresolved hyperparameter sequences"):
+        validate_local_kernel_plan_runtime_hyperparameters(plan_path)
+
+
+def test_validate_local_kernel_plan_runtime_hyperparameters_allows_string_sequence_binding(
+    tmp_path: Path,
+) -> None:
+    plan_path = _write_pipeline_plan(
+        tmp_path,
+        name="nested_oof_ensemble",
+        key_hyperparameters={
+            "calibration_methods": ["identity", "temperature", "multinomial_logit"],
+        },
+        toggles={"CALIBRATION_METHODS": "identity,temperature,multinomial_logit"},
+    )
+
+    validate_local_kernel_plan_runtime_hyperparameters(plan_path)
+
+
+def test_validate_local_kernel_plan_runtime_hyperparameters_allows_numeric_sequence_binding(
+    tmp_path: Path,
+) -> None:
+    plan_path = _write_pipeline_plan(
+        tmp_path,
+        name="nested_oof_ensemble",
+        key_hyperparameters={"calibrator_C_grid": [0.03, 0.1, 0.3, 1.0]},
+        toggles={"CALIBRATOR_C_GRID": "0.03,0.1,0.3,1.0"},
+    )
+
+    validate_local_kernel_plan_runtime_hyperparameters(plan_path)
+
+
+@pytest.mark.parametrize(
+    "toggles",
+    [
+        {},
+        {"CALIBRATION_METHODS": "temperature,identity,multinomial_logit"},
+    ],
+)
+def test_validate_local_kernel_plan_runtime_hyperparameters_rejects_unbound_or_reordered_sequence(
+    tmp_path: Path,
+    toggles: dict[str, object],
+) -> None:
+    plan_path = _write_pipeline_plan(
+        tmp_path,
+        name="nested_oof_ensemble",
+        key_hyperparameters={
+            "calibration_methods": ["identity", "temperature", "multinomial_logit"],
+        },
+        toggles=toggles,
+    )
+
+    with pytest.raises(KernelFailedError, match="key_hyperparameters.calibration_methods"):
+        validate_local_kernel_plan_runtime_hyperparameters(plan_path)
+
+
+def test_validate_local_kernel_plan_runtime_hyperparameters_rejects_unrelated_unbound_sequence(
+    tmp_path: Path,
+) -> None:
+    plan_path = _write_pipeline_plan(
+        tmp_path,
+        name="nested_oof_ensemble",
+        key_hyperparameters={
+            "calibration_methods": ["identity", "temperature", "multinomial_logit"],
+            "dropout": [0.05, 0.1],
+        },
+        toggles={"CALIBRATION_METHODS": "identity,temperature,multinomial_logit"},
+    )
+
+    with pytest.raises(KernelFailedError, match="key_hyperparameters.dropout"):
         validate_local_kernel_plan_runtime_hyperparameters(plan_path)
 
 

@@ -316,6 +316,7 @@ def train(
             timeout_minutes=resolved_time_budget,
             strict_accelerator=strict_accelerator,
             hardware_profile=hardware_profile,
+            plan_path=paths.plan_path,
         )
         if kernel_result.submission_path:
             submission_path = store_submission_artifact(

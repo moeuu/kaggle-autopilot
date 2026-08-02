@@ -718,7 +718,12 @@ def write_resolved_plan_config(
 def apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -> dict[str, object]:
     guarded: dict[str, object] = dict(payload)
 
-    training_route = decide_training_route(guarded)
+    deliverable_mode = infer_deliverable_mode_from_paths(paths)
+    training_route = decide_training_route(
+        guarded,
+        deliverable_mode=deliverable_mode,
+        require_training=True,
+    )
     guarded["execution_route"] = approved_execution_route(training_route)
 
     raw_toggles = guarded.get("toggles")
@@ -757,7 +762,7 @@ def apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -
     modality = str(profile.get("modality") or "").strip().lower()
     top_class_ratio = _extract_top_class_ratio(profile)
     severe_imbalance = bool(task == "classification" and top_class_ratio is not None and top_class_ratio >= 0.98)
-    leaderboard_mode = infer_deliverable_mode_from_paths(paths) != "writeup"
+    leaderboard_mode = deliverable_mode != "writeup"
 
     if leaderboard_mode:
         target_medal = normalize_target_medal(guarded.get("target_medal"), default=DEFAULT_TARGET_MEDAL)

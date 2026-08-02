@@ -959,6 +959,41 @@ def run_submit_kernel(
     )
 
 
+def _stage_local_kernel_plan_snapshot(*, source_plan_path: Path, targets: list[Path]) -> None:
+    """Copy one authoritative plan snapshot and verify every staged byte."""
+    if not source_plan_path.is_file():
+        for target in targets:
+            if target.resolve() != source_plan_path.resolve():
+                target.unlink(missing_ok=True)
+        return
+
+    source_hash_before = sha256_path(source_plan_path)
+    _kernel_package_files.sync_plan_snapshot(plan_path=source_plan_path, targets=targets)
+    source_hash = sha256_path(source_plan_path)
+    for target in targets:
+        if target.resolve() == source_plan_path.resolve():
+            continue
+        staged_hash = sha256_path(target) if target.is_file() else None
+        if source_hash_before == source_hash == staged_hash:
+            continue
+        staged_payload = load_json_object_or_empty(target)
+        raw_pipelines = staged_payload.get("pipelines")
+        staged_pipeline_names = [
+            str(item.get("name") or f"pipeline_{index + 1}")
+            for index, item in enumerate(raw_pipelines if isinstance(raw_pipelines, list) else [])
+            if isinstance(item, dict)
+        ]
+        raise KernelFailedError(
+            "Local kernel plan staging integrity check failed: "
+            f"source_plan={source_plan_path}, "
+            f"source_sha256={source_hash}, "
+            f"source_sha256_before_copy={source_hash_before}, "
+            f"staged_plan={target}, "
+            f"staged_sha256={staged_hash or '(missing)'}, "
+            f"staged_pipeline_names={staged_pipeline_names}"
+        )
+
+
 def run_kernel_local(
     *,
     slug: str,
@@ -976,10 +1011,12 @@ def run_kernel_local(
     timeout_minutes: int | None,
     strict_accelerator: bool = False,
     hardware_profile: str | None = "auto",
+    plan_path: Path | None = None,
 ) -> KernelRunResult:
     del metric, direction, holdout_frac, cv_folds, seed
 
     kernel_source_dir = base_dir / slug / "kernel"
+    source_plan_path = plan_path if plan_path is not None else base_dir / slug / "plan.json"
     kernel_stage_dir = base_dir / slug / "kernels" / run_id / f"local-iter-{iteration}"
     run_dir = kernel_stage_dir.parent
     context_dir = base_dir / slug / "context"
@@ -999,7 +1036,7 @@ def run_kernel_local(
     kernel_path = kernel_source_dir / "kernel.py"
     if not kernel_path.exists():
         raise KernelFailedError(f"Local kernel execution requires {kernel_path} to exist.")
-    source_plan = load_json_object_or_empty(base_dir / slug / "plan.json")
+    source_plan = load_json_object_or_empty(source_plan_path)
     deliverable_contract = resolve_deliverable_artifact_contract(base_dir / slug)
     if plan_requests_non_training(source_plan):
         source_issues = validate_non_training_source(kernel_path.read_text(encoding="utf-8", errors="ignore"))
@@ -1023,8 +1060,8 @@ def run_kernel_local(
     _kernel_package_files.copy_kernel_sources(kernel_source_dir, kernel_stage_dir)
     _kernel_package_files.copy_shared_kernel_runtime_modules(kernel_stage_dir)
     _kernel_package_files.copy_competition_external_assets(base_dir=base_dir, slug=slug, kernel_dir=kernel_stage_dir)
-    _kernel_package_files.sync_plan_snapshot(
-        plan_path=base_dir / slug / "plan.json",
+    _stage_local_kernel_plan_snapshot(
+        source_plan_path=source_plan_path,
         targets=[
             kernel_stage_dir / "plan.json",
             kernel_stage_dir.parent / "plan.json",

@@ -22,6 +22,33 @@ _ALLOWED_RUNTIME_SEQUENCE_PATHS = {
 }
 
 
+def _runtime_sequence_binding_matches(sequence_value: object, toggle_value: object) -> bool:
+    if not isinstance(sequence_value, (list, tuple)) or not sequence_value:
+        return False
+    if not isinstance(toggle_value, str) or not toggle_value.strip():
+        return False
+
+    parsed_values = [item.strip() for item in toggle_value.split(",")]
+    if not parsed_values or any(not item for item in parsed_values):
+        return False
+
+    if all(isinstance(item, str) for item in sequence_value):
+        return list(sequence_value) == parsed_values
+
+    if not all(not isinstance(item, bool) and isinstance(item, (int, float)) for item in sequence_value):
+        return False
+    try:
+        numeric_sequence = [float(item) for item in sequence_value]
+        numeric_toggle = [float(item) for item in parsed_values]
+    except (OverflowError, ValueError):
+        return False
+    return (
+        all(math.isfinite(item) for item in numeric_sequence)
+        and all(math.isfinite(item) for item in numeric_toggle)
+        and numeric_sequence == numeric_toggle
+    )
+
+
 def _is_allowed_runtime_sequence(*, pipeline_name: str | None, path: str, value: object) -> bool:
     if (pipeline_name, path) not in _ALLOWED_RUNTIME_SEQUENCE_PATHS:
         return False
@@ -52,6 +79,7 @@ def find_runtime_hyperparameter_sequence_paths(
     *,
     prefix: str = "key_hyperparameters",
     pipeline_name: str | None = None,
+    runtime_toggles: dict[str, object] | None = None,
 ) -> list[str]:
     paths: list[str] = []
     if isinstance(value, dict):
@@ -61,6 +89,7 @@ def find_runtime_hyperparameter_sequence_paths(
                     item,
                     prefix=f"{prefix}.{key}",
                     pipeline_name=pipeline_name,
+                    runtime_toggles=runtime_toggles,
                 )
             )
         return paths
@@ -75,6 +104,10 @@ def find_runtime_hyperparameter_sequence_paths(
             path=prefix,
             value=value,
         ):
+            return paths
+        toggle_key = prefix.rsplit(".", 1)[-1].upper()
+        toggle_value = runtime_toggles.get(toggle_key) if runtime_toggles is not None else None
+        if _runtime_sequence_binding_matches(value, toggle_value):
             return paths
         paths.append(prefix)
     return paths
@@ -93,6 +126,8 @@ def validate_local_kernel_plan_runtime_hyperparameters(plan_path: Path) -> None:
     pipelines = payload.get("pipelines")
     if not isinstance(pipelines, list):
         return
+    toggles = payload.get("toggles")
+    runtime_toggles = toggles if isinstance(toggles, dict) else None
 
     for index, item in enumerate(pipelines):
         if not isinstance(item, dict) or "key_hyperparameters" not in item:
@@ -106,6 +141,7 @@ def validate_local_kernel_plan_runtime_hyperparameters(plan_path: Path) -> None:
         sequence_paths = find_runtime_hyperparameter_sequence_paths(
             key_hyperparameters,
             pipeline_name=name,
+            runtime_toggles=runtime_toggles,
         )
         if sequence_paths:
             raise KernelFailedError(

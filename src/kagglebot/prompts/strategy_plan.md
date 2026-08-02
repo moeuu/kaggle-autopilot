@@ -195,8 +195,8 @@ Provide a JSON object with these keys (do not wrap in markdown):
 - seed (int)
 - time_budget_min (int|null; local_gpu is safety-capped at 1440 minutes unless a lower rule/operator limit applies)
 - hardware_profile (string; use the selected profile key such as "rtx3060" or "rtx5090")
-- runtime_budget (object; include hardware_profile, gpu_vram_gb, gpu_count, max_runtime_min, `local_training_required` (bool), `estimated_local_training_min` (int; non-training routing requires >=1440), `training_cost_class` (light|moderate|heavy|very_heavy|extreme; informational and never a substitute for the numeric estimate), and concrete caps such as max_rerank_candidates, embedding_batch_size, full_training_seeds, full_training_folds when applicable)
-- non_training_submission (object|null; use an object only for a completed path that can generate the real submission without fitting locally. Include `mode` (pretrained_inference|reference_notebook|solver|search|simulation|optimization|rule_based), `implementation_ready` (bool), `validation_mode` (offline|reference_reproduction|contract|smoke), and a concrete `source` identifying the implemented kernel/model/reference evidence)
+- runtime_budget (object; include hardware_profile, gpu_vram_gb, gpu_count, max_runtime_min, `local_training_required=true`, `estimated_local_training_min` (int), `training_cost_class` (light|moderate|heavy|very_heavy|extreme), and concrete caps such as max_rerank_candidates, embedding_batch_size, full_training_seeds, full_training_folds when applicable. Runtime cost must change scale, not disable learning.)
+- non_training_submission (null; autopilot requires a real learning/update step for every competition)
 - max_iterations (int, default 5 when real training/validation is required; use 3 for long-running heavy local_gpu plans)
 - patience (int, prefer >=4 so promising runs are not cut early)
 - min_improvement (number)
@@ -209,7 +209,7 @@ Provide a JSON object with these keys (do not wrap in markdown):
     - {"name":"competition_plus_original","train_mode":"competition_plus_original","feature_recipe":"full","lightweight":false,"promotion_stage":"ablation_fast"}
     - {"name":"orig_signal_only","train_mode":"competition_only","feature_recipe":"orig_signal_only","lightweight":true,"promotion_stage":"ablation_fast"}
   - Do not use `suite_aware_ablations` instead of `suites`; the validator requires `suites`.
-- toggles (object; include generic pipeline/feature/runtime toggles and FAST_DEV default; validation must remain enabled and packaging-only/noop/identity/unscored fallback modes must be disabled. Enable training unless the strict `non_training_submission` contract above is satisfied.)
+- toggles (object; include generic pipeline/feature/runtime toggles and FAST_DEV default; training and validation must remain enabled and packaging-only/noop/identity/unscored fallback modes must be disabled.)
 - evaluation_protocol (object; include `cv_type`, `n_folds`, `seeds`, and `primary_metric` based on the competition; use >=3 seeds for cheap/tabular evaluation, but only one full-training seed for heavy deep-learning runs)
 - stop_policy (object; include exact keys `max_iterations` and `error_fingerprint_abort`; `error_fingerprint_abort` may be bool or object)
 
@@ -231,8 +231,8 @@ Require the implementation to include:
 - Per-model OOF/test predictions saved as `.npy` under both `/kaggle/working` and local output dir
 - Ensemble selection only if shortlisted in plan (e.g., stacking/blending/rank-mean)
 - Final method chosen by plan primary metric (tie-breaker: simpler/faster)
-- Every training-route iteration must train at least one real candidate and compute a competition-faithful validation score from train data. An approved non-training route must instead run the implemented inference/solver path, perform its declared validation, and write `metrics.json` with `execution_mode="non_training_submission"`, `training_performed=false`, `non_training_validation_passed=true`, and the exact `non_training_validation_mode`. Do not report placeholder, proxy, public-anchor, packaging-only, or unscored metrics as the iteration score.
-- Never implement a non-training route by copying the sample submission or emitting dummy/constant fallback predictions. The normal output-contract, semantic, duplicate, quota, ledger, Codex evidence-review, and submission guards still apply.
+- Every iteration must train or update at least one real parameterized candidate and compute a competition-faithful validation score. When bundled labels do not exist, use rules-permitted public/reference tasks, the official practice evaluator, or leakage-safe generated examples to learn a proposer, reranker, calibrator, adapter, policy, or search distribution. Write `metrics.json` with `training_performed=true` and evidence of the learned component and baseline delta.
+- Static prompt/artifact generation, deterministic compilation, frozen inference, solver execution without parameter updates, sample-submission copying, and dummy/constant outputs do not satisfy the learning contract. Keep the normal output-contract, semantic, duplicate, quota, ledger, Codex evidence-review, and submission guards enabled.
 - Keep the full kernel within the local GPU budget; do not implement a full-training seed x fold x model-family Cartesian product when cached embeddings, staged ablations, TTA, or lightweight heads can preserve score signal faster.
 - Never include oracle overrides (`build_oracle_game_map`, `apply_oracle_override`, `KAGGLEBOT_ORACLE_MODE`) or leaderboard-proxy score reporting
 - Submission validation (columns, rows, no NaN/inf, clipped if needed)

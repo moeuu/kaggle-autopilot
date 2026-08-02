@@ -45,12 +45,12 @@ Implementation contract for `kernel.py`:
   - `N_FOLDS`, `SEEDS`, `FAST_DEV`
   - plan-driven pipeline toggles (do not hardcode a single model family)
   - `GPU_DEVICE`
-- Validation is mandatory for every iteration. Training is mandatory unless plan.json contains an approved
-  `execution_route.mode="non_training_submission"`. For that route, honor `KAGGLEBOT_EXECUTION_MODE`, do not fit a
-  model locally, and execute the concrete pretrained/reference/solver/search/simulation/optimization/rule-based path
-  named by the plan. Treat `KAGGLEBOT_NON_TRAINING_VALIDATION_REQUIRED=1` as requiring the planned non-training
-  validation, not CV model fitting. Always ignore packaging-only/noop/identity, sample-template copying, dummy,
-  unscored, proxy, and public-anchor fallbacks.
+- Training and validation are mandatory for every iteration. Ignore any proposed
+  `execution_route.mode="non_training_submission"` and keep `KAGGLEBOT_DO_TRAIN=1`. If bundled labels do not exist,
+  use rules-permitted public/reference tasks, the official practice evaluator, or leakage-safe generated examples to
+  fit or update a proposer, reranker, calibrator, adapter, policy, or search distribution. Static generation,
+  deterministic compilation, frozen inference, packaging-only/noop/identity, sample-template copying, dummy,
+  unscored, proxy, and public-anchor fallbacks do not count as training.
 - Unified execution contract:
   - The exact same `kernel.py` must run on `local_gpu` and `kaggle_gpu`
   - Only execution location/runtime differs; algorithm path must be shared
@@ -83,10 +83,8 @@ Implementation contract for `kernel.py`:
   - Print per-pipeline CV summary for the plan primary metric
   - Use the same metric implementation/path for epoch model-selection and final offline scoring
     (do not optimize on a proxy metric that differs from final reported score)
-  - On the normal training route, `metrics.json` must describe a real trained candidate with a competition-faithful
-    CV/holdout score from train data. On the approved non-training route, it must describe the real implemented result,
-    its declared validation, and include `execution_mode="non_training_submission"`, `training_performed=false`,
-    `non_training_validation_passed=true`, and the exact planned `non_training_validation_mode`. Do not write
+  - `metrics.json` must describe a real learned candidate, include `training_performed=true`, identify the updated
+    component and baseline delta, and report a competition-faithful CV/holdout/practice-evaluator score. Do not write
     placeholder, proxy, public-anchor, packaging-only, or unscored scores as the primary score.
   - When multiple candidates exist, log each candidate's CV score, holdout/validation score,
     and test/submission prediction distribution. Do not choose the final submission by CV alone

@@ -306,7 +306,18 @@ def test_prepare_competition_reuses_eval_spec_despite_global_force(monkeypatch, 
             return {"metric_name": "auc"}, "frozen"
 
     monkeypatch.delenv("KAGGLEBOT_REFRESH_EVALUATION_SPEC", raising=False)
-    monkeypatch.setattr(supervisor, "bootstrap_competition", lambda **kwargs: None)
+
+    def fake_bootstrap(**kwargs) -> None:  # noqa: ANN003
+        bootstrap_paths = kwargs["paths"]
+        bootstrap_paths.context_dir.mkdir(parents=True, exist_ok=True)
+        bootstrap_paths.data_dir.mkdir(parents=True, exist_ok=True)
+        bootstrap_paths.dataset_profile_path.write_text(
+            json.dumps({"status": "ready", "task": "classification", "modality": "tabular"}),
+            encoding="utf-8",
+        )
+        (bootstrap_paths.data_dir / "train.csv").write_text("id,target\n1,0\n", encoding="utf-8")
+
+    monkeypatch.setattr(supervisor, "bootstrap_competition", fake_bootstrap)
     monkeypatch.setattr(supervisor, "EvaluationAdvisor", FakeAdvisor)
     monkeypatch.setattr(
         supervisor,
@@ -343,6 +354,11 @@ def test_prepare_competition_resume_reuses_existing_data_without_kaggle_download
     )
     paths.context_dir.mkdir(parents=True)
     paths.data_dir.mkdir(parents=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"status": "ready", "task": "classification", "modality": "tabular"}),
+        encoding="utf-8",
+    )
+    (paths.data_dir / "train.csv").write_text("id,target\n1,0\n", encoding="utf-8")
     knowledge_paths = supervisor.KnowledgePaths(workdir=tmp_path)
     phases: list[tuple[str, str]] = []
 
@@ -379,6 +395,58 @@ def test_prepare_competition_resume_reuses_existing_data_without_kaggle_download
         ("preparing_data", "reusing existing competition data and context"),
         ("oracle_evaluation_advisor", "resolving evaluation specification"),
     ]
+
+
+def test_prepare_competition_accepts_writeup_without_bundled_training_data(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    candidate = _competition("writeup-demo")
+    paths = supervisor.CompetitionPaths(slug=candidate.slug, artifacts_dir=config.artifacts_dir)
+
+    def fake_bootstrap(**kwargs) -> None:  # noqa: ANN003
+        bootstrap_paths = kwargs["paths"]
+        bootstrap_paths.context_dir.mkdir(parents=True, exist_ok=True)
+        bootstrap_paths.data_dir.mkdir(parents=True, exist_ok=True)
+        bootstrap_paths.rules_md_path.write_text(
+            "The final submission is a Kaggle writeup.\n"
+            "Teams must submit a writeup describing the artifact.\n"
+            "The writeup is the primary competition deliverable.\n",
+            encoding="utf-8",
+        )
+        bootstrap_paths.dataset_profile_path.write_text(
+            json.dumps({"status": "non_tabular_data", "task": "text", "modality": "text"}),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(supervisor, "bootstrap_competition", fake_bootstrap)
+
+    supervisor._prepare_competition(
+        config=config,
+        candidate=candidate,
+        paths=paths,
+        knowledge_paths=supervisor.KnowledgePaths(workdir=tmp_path),
+        run_id="run-1",
+    )
+
+    assert paths.dataset_profile_path.is_file()
+
+
+def test_watch_training_completion_rejects_diagnostic_only_run(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_dir = paths.run_dir("run-1")
+    iter_dir = run_dir / "iter-1"
+    iter_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps({"status": "validated_unscored_artifact"}),
+        encoding="utf-8",
+    )
+    (iter_dir / "iteration_state.json").write_text(
+        json.dumps({"iteration_complete": True, "trained": False}),
+        encoding="utf-8",
+    )
+
+    issue = supervisor._watch_training_completion_issue(paths=paths, run_id="run-1")
+
+    assert issue == "run status is validated_unscored_artifact"
 
 
 def test_select_next_competition_filters_disabled_and_blocked(monkeypatch, tmp_path: Path) -> None:

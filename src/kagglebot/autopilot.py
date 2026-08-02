@@ -7,6 +7,7 @@ import re
 import time
 import traceback
 from dataclasses import dataclass, replace
+from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,7 @@ from kagglebot import json_utils as _json_utils
 from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_fix_context as _kernel_fix_context
 from kagglebot import kernel_metrics as _kernel_metrics
+from kagglebot import kernel_plan_validation as _kernel_plan_validation
 from kagglebot import kernel_preflight as _kernel_preflight
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
@@ -288,7 +290,7 @@ def _normalized_score_source(value: object) -> str:
 
 
 def _is_finite_score(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+    return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
 def _metric_names_compatible(actual: object, expected: object) -> bool:
@@ -505,6 +507,69 @@ def _scored_primary_contract_issues(
     return tuple(issues)
 
 
+def _canonical_metric_contract_issues(
+    *,
+    metrics: dict[str, object],
+    authoritative_contract: dict[str, object],
+) -> tuple[str, ...]:
+    issues: list[str] = []
+    actual_metric = _first_nonempty_string(
+        metrics.get("metric_name"),
+        metrics.get("metric"),
+        metrics.get("target_metric"),
+    )
+    expected_metric = authoritative_contract.get("expected_metric")
+    if not _metric_names_compatible(actual_metric, expected_metric):
+        issues.append("metric name does not match the authoritative evaluation metric")
+
+    actual_direction = _first_nonempty_string(
+        metrics.get("direction"),
+        metrics.get("metric_direction"),
+        metrics.get("target_direction"),
+    )
+    expected_direction = _first_nonempty_string(authoritative_contract.get("expected_direction"))
+    if expected_direction and (not actual_direction or actual_direction.lower() != expected_direction.lower()):
+        issues.append("metric direction does not match the authoritative evaluation direction")
+
+    score_source = _normalized_score_source(metrics.get("score_source"))
+    raw_accepted_sources = authoritative_contract.get("accepted_score_sources")
+    accepted_sources = (
+        {_normalized_score_source(item) for item in raw_accepted_sources}
+        if isinstance(raw_accepted_sources, (list, tuple))
+        else set()
+    )
+    if not score_source or score_source not in accepted_sources:
+        issues.append("score_source is not accepted by the authoritative evaluation contract")
+
+    if (
+        authoritative_contract.get("require_trusted_score_source") is True
+        and metrics.get("model_selection_trusted") is not True
+    ):
+        issues.append("model-selection score is not explicitly trusted")
+    return tuple(issues)
+
+
+def _kernel_metric_ingestion_error(
+    *,
+    reason: str,
+    metrics_path: Path,
+    metrics: dict[str, object],
+    candidate_key: str | None,
+    contract_issues: tuple[str, ...] = (),
+) -> KernelFailedError:
+    candidate_value = metrics.get(candidate_key) if candidate_key is not None else None
+    detail = (
+        f"reason={reason}; metrics_path={metrics_path}; metrics_file_exists={metrics_path.is_file()}; "
+        f"top_level_keys={sorted(str(key) for key in metrics)}; "
+        f"candidate_score_key={candidate_key or '(missing)'}; "
+        f"candidate_score_type={type(candidate_value).__name__ if candidate_key is not None else '(missing)'}; "
+        f"failure_json_exists={(metrics_path.parent / 'failure.json').is_file()}"
+    )
+    if contract_issues:
+        detail += "; contract_issues=" + ", ".join(contract_issues)
+    return KernelFailedError(f"Kernel metrics rejected: {detail}")
+
+
 def _load_contract_aware_kernel_metrics(
     *,
     metrics_path: Path,
@@ -513,6 +578,53 @@ def _load_contract_aware_kernel_metrics(
     target_metric: str,
     authoritative_contract: dict[str, object],
 ) -> EvaluationResult | None:
+    if "metric_value" in metrics:
+        raw_metric_value = metrics["metric_value"]
+        if isinstance(raw_metric_value, bool) or not isinstance(raw_metric_value, Real):
+            raise _kernel_metric_ingestion_error(
+                reason="metric_value_not_numeric",
+                metrics_path=metrics_path,
+                metrics=metrics,
+                candidate_key="metric_value",
+            )
+        if not math.isfinite(float(raw_metric_value)):
+            raise _kernel_metric_ingestion_error(
+                reason="metric_value_non_finite",
+                metrics_path=metrics_path,
+                metrics=metrics,
+                candidate_key="metric_value",
+            )
+        contract_issues = _canonical_metric_contract_issues(
+            metrics=metrics,
+            authoritative_contract=authoritative_contract,
+        )
+        if contract_issues:
+            raise _kernel_metric_ingestion_error(
+                reason="metric_contract_rejected",
+                metrics_path=metrics_path,
+                metrics=metrics,
+                candidate_key="metric_value",
+                contract_issues=contract_issues,
+            )
+        metric_name = _first_nonempty_string(
+            metrics.get("metric_name"),
+            metrics.get("metric"),
+            metrics.get("target_metric"),
+        )
+        metric_direction = _first_nonempty_string(
+            metrics.get("direction"),
+            metrics.get("metric_direction"),
+            metrics.get("target_direction"),
+        )
+        scored_payload = dict(metrics)
+        scored_payload["offline_value"] = float(raw_metric_value)
+        scored_payload["metric"] = metric_name or target_metric
+        scored_payload["direction"] = metric_direction or direction
+        return _kernel_metrics.evaluation_from_kernel_metrics_payload(
+            scored_payload,
+            direction=direction,
+            target_metric=target_metric,
+        )
     if "primary_score" not in metrics:
         return _kernel_metrics.load_kernel_metrics(metrics_path, direction, target_metric)
     raw_primary_score = metrics.get("primary_score")
@@ -1395,6 +1507,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         deliverable_mode=deliverable_mode,
         submit_mode=submit_mode,
         code_competition=bool(resolved.get("code_competition")),
+        require_training=True,
     )
     direct_notebook_execution = bool(training_route_decision.direct_notebook and submit_enabled)
     training_route_payload = training_route_decision.to_dict()
@@ -2016,6 +2129,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             timeout_minutes=time_budget_min,
                             strict_accelerator=config.strict_accelerator,
                             hardware_profile=config.hardware_profile,
+                            plan_path=config.paths.plan_path,
                         )
                         iteration_kernel_id = kernel_result.kernel_id
                         if kernel_result.submission_path:
@@ -2455,6 +2569,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             timeout_minutes=time_budget_min,
                             strict_accelerator=config.strict_accelerator,
                             hardware_profile=config.hardware_profile,
+                            plan_path=config.paths.plan_path,
                         )
                         iteration_kernel_id = kernel_result.kernel_id
                         if kernel_result.submission_path:
@@ -4540,6 +4655,37 @@ def _run_improvement_body(
     )
 
 
+_LOCAL_STAGED_PLAN_SEQUENCE_ERROR = "Local kernel staged plan contains unresolved hyperparameter sequences"
+
+
+def _authoritative_plan_supersedes_failed_local_stage(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    iteration: int,
+    error_message: str,
+) -> bool:
+    """Return whether regeneration replaced the plan that failed local staging."""
+    if _LOCAL_STAGED_PLAN_SEQUENCE_ERROR not in error_message:
+        return False
+    source_plan_path = config.paths.plan_path
+    failed_stage_plan_path = config.paths.kernels_dir / run_id / f"local-iter-{iteration}" / "plan.json"
+    source_hash = _sha256_or_none(source_plan_path)
+    failed_stage_hash = _sha256_or_none(failed_stage_plan_path)
+    if source_hash is None or failed_stage_hash is None or source_hash == failed_stage_hash:
+        return False
+    try:
+        _kernel_plan_validation.validate_local_kernel_plan_runtime_hyperparameters(source_plan_path)
+    except KernelFailedError:
+        return False
+    print(
+        "[yellow]kernel fix[/yellow]: authoritative plan now passes local runtime validation "
+        f"and supersedes the failed staged snapshot (source_sha256={source_hash}, "
+        f"failed_staged_sha256={failed_stage_hash}); retrying with a fresh stage."
+    )
+    return True
+
+
 def _run_kernel_fix(
     *,
     config: AutopilotConfig,
@@ -4873,6 +5019,33 @@ def _run_kernel_fix_body(
                     get_kernel_sha256=lambda: _kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir),
                 )
             if not kernel_changed and not regenerated:
+                if _authoritative_plan_supersedes_failed_local_stage(
+                    config=config,
+                    run_id=run_id,
+                    iteration=iteration,
+                    error_message=error_message,
+                ):
+                    if pending_error_fixes is not None:
+                        pending_error_fixes.append(
+                            {
+                                "iteration": iteration,
+                                "error_message": error_message,
+                                "fix_summary": (
+                                    "Authoritative plan superseded the failed staged snapshot and passed "
+                                    "local runtime-plan validation; retrying fresh staging."
+                                ),
+                                "resolved": True,
+                            }
+                        )
+                    return _kernel_preflight.KernelFixResult(
+                        agent_exit_code=result.returncode,
+                        repo_changed=bool(repo_changed_paths),
+                        changed_paths=tuple(sorted(repo_changed_paths)),
+                        kernel_sha_before=kernel_sha_before,
+                        kernel_sha_after=_kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir),
+                        regeneration_attempted=regeneration_attempted,
+                        regeneration_already_used=regeneration_already_used,
+                    )
                 if failure_stage == "kernel_source_preflight":
                     raise KernelFailedError(
                         "Kernel fix made no repository changes and kernel source preflight still fails.\n"

@@ -3,6 +3,7 @@
 Recommended action: Add cheaper smoke tests and resource-aware model schedules before expensive runs.
 
 ## Signals
+- playground-series-s6e7 20260731T170652Z-e6cedcfd: gap=0.0036599999999999966
 - scripture-in-new-frontiers 20260729T081158Z-399ad2dd: gap=None
 - soccer-feature-engineering-hackathon 20260719T100737Z-031b686d: gap=None
 - scripture-in-new-frontiers 20260718T095023Z-c876dbbc: gap=None

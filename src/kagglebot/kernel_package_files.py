@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from kagglebot.artifact_io import copy_artifact_if_needed
@@ -80,4 +82,19 @@ def sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
     for target in targets:
         if target.resolve() == plan_path.resolve():
             continue
-        copy_artifact_if_needed(source=plan_path, destination=target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            file_descriptor, temporary_name = tempfile.mkstemp(
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+            )
+            temporary_path = Path(temporary_name)
+            os.close(file_descriptor)
+            shutil.copy2(plan_path, temporary_path)
+            os.replace(temporary_path, target)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)

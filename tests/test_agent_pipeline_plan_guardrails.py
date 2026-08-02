@@ -277,14 +277,19 @@ def test_write_plan_payload_forces_training_and_validation(tmp_path: Path) -> No
     assert runtime["allow_unscored_submission"] is False
 
 
-def test_write_plan_payload_allows_ready_non_training_route_but_keeps_validation(tmp_path: Path) -> None:
+def test_write_plan_payload_forces_training_for_writeup_with_ready_non_training_route(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
     paths.dataset_profile_path.write_text(
         json.dumps({"task": "optimization", "modality": "graph", "train_rows": 100_000}, indent=2),
         encoding="utf-8",
     )
-    paths.rules_md_path.write_text("External data is allowed for this challenge.", encoding="utf-8")
+    paths.rules_md_path.write_text(
+        "The final submission is a Kaggle writeup.\n"
+        "Teams must submit a writeup describing the skill artifact.\n"
+        "The writeup is the primary competition deliverable.\n",
+        encoding="utf-8",
+    )
     payload = _base_payload()
     payload["runtime_budget"] = {
         "local_training_required": False,
@@ -300,14 +305,48 @@ def test_write_plan_payload_allows_ready_non_training_route_but_keeps_validation
     write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
-    assert persisted["execution_route"]["approved"] is True
-    assert persisted["execution_route"]["mode"] == "non_training_submission"
-    assert persisted["toggles"]["ENABLE_TRAINING"] is False
-    assert persisted["toggles"]["TRAINING_DISABLED"] is True
+    assert persisted["execution_route"]["approved"] is False
+    assert persisted["execution_route"]["mode"] == "train_and_validate"
+    assert persisted["execution_route"]["reason"] == "training_required_by_autopilot"
+    assert persisted["toggles"]["ENABLE_TRAINING"] is True
+    assert persisted["toggles"]["TRAINING_DISABLED"] is False
     assert persisted["toggles"]["RUN_VALIDATION"] is True
-    assert persisted["runtime_budget"]["enable_training"] is False
+    assert persisted["runtime_budget"]["enable_training"] is True
     assert persisted["runtime_budget"]["run_validation"] is True
     assert persisted["runtime_budget"]["allow_unscored_submission"] is False
+
+
+def test_write_plan_payload_forces_training_for_leaderboard_even_with_ready_non_training_route(
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"task": "classification", "modality": "tabular", "train_rows": 100_000}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("Submit predictions to the leaderboard.", encoding="utf-8")
+    payload = _base_payload()
+    payload["runtime_budget"] = {
+        "local_training_required": False,
+        "estimated_local_training_min": 1_500,
+        "non_training_submission": {
+            "mode": "pretrained_inference",
+            "implementation_ready": True,
+            "validation_mode": "offline",
+            "source": "kernel.py loads a frozen checkpoint",
+        },
+    }
+
+    write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["execution_route"]["approved"] is False
+    assert persisted["execution_route"]["mode"] == "train_and_validate"
+    assert persisted["execution_route"]["reason"] == "training_required_by_autopilot"
+    assert persisted["toggles"]["ENABLE_TRAINING"] is True
+    assert persisted["toggles"]["TRAINING_DISABLED"] is False
+    assert persisted["runtime_budget"]["enable_training"] is True
 
 
 def test_write_plan_payload_does_not_skip_training_without_implemented_path(tmp_path: Path) -> None:

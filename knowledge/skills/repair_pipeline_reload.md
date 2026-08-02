@@ -2,7 +2,7 @@
 
 - skill_id: `repair_pipeline_reload`
 - status: `candidate`
-- version: `503`
+- version: `504`
 - problem_types: orchestration, autofix
 - tags: repair_pipeline_failure, self_improvement
 

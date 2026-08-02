@@ -61,6 +61,7 @@ def decide_training_route(
     deliverable_mode: str | None = None,
     submit_mode: str | None = None,
     code_competition: bool = False,
+    require_training: bool = False,
 ) -> TrainingRouteDecision:
     runtime_budget = _mapping(plan.get("runtime_budget"))
     proposal = _mapping(plan.get("non_training_submission")) or _mapping(runtime_budget.get("non_training_submission"))
@@ -71,6 +72,14 @@ def decide_training_route(
         plan.get("local_training_required"),
         runtime_budget.get("local_training_required"),
     )
+
+    if require_training:
+        return TrainingRouteDecision(
+            skip_local_training=False,
+            direct_notebook=False,
+            reason="training_required_by_autopilot",
+            estimated_local_training_min=estimated_minutes,
+        )
 
     if local_training_required is not False:
         return TrainingRouteDecision(

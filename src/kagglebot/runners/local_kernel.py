@@ -35,6 +35,7 @@ class LocalKernelRunner:
             dry_run=context.dry_run,
             timeout_minutes=context.time_budget_minutes,
             strict_accelerator=context.strict_accelerator,
+            plan_path=context.paths.plan_path,
         )
 
         summary = {

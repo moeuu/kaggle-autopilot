@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from kagglebot.hashing import sha256_file_or_none
 from kagglebot.submit_attempts import SubmitAttemptRecorder, append_submit_attempt, load_latest_submit_attempt
 from kagglebot.submit_failure_context import (
     apply_stale_submit_autofix_decision,
@@ -927,6 +928,7 @@ def test_submit_file_fix_contract_satisfied_requires_changed_artifact(tmp_path: 
 def test_save_submit_autofix_repaired_path_for_run_binds_run_state(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     fixed = tmp_path / "submission-fixed.csv"
+    fixed.write_text("id,target\n1,0.2\n", encoding="utf-8")
     saved_updates: list[tuple[Path, dict[str, object]]] = []
 
     save_submit_autofix_repaired_path_for_run(
@@ -935,7 +937,16 @@ def test_save_submit_autofix_repaired_path_for_run_binds_run_state(tmp_path: Pat
         save_run_state_for_run=lambda state_run_dir, updates: saved_updates.append((state_run_dir, updates)),
     )
 
-    assert saved_updates == [(run_dir, {"submit_autofix_submission_path": str(fixed)})]
+    assert saved_updates == [
+        (
+            run_dir,
+            {
+                "submit_autofix_submission_path": str(fixed),
+                "last_submission_path": str(fixed),
+                "last_submission_sha256": sha256_file_or_none(fixed),
+            },
+        )
+    ]
 
 
 def test_submit_file_fix_contract_satisfied_for_run_loads_run_state(tmp_path: Path) -> None:

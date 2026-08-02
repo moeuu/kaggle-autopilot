@@ -3,6 +3,7 @@
 Recommended action: Improve submit fallback diagnostics, notebook/file mode inference, and retry classification.
 
 ## Signals
+- playground-series-s6e7 20260731T170652Z-e6cedcfd: gap=0.0036599999999999966
 - cuhk-x-competition-large-model-track 20260727T053217Z-5763c450: gap=0.53508
 - autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: reason=OracleStrategyError fingerprint=a63a761b94b857bf966a
 - cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: reason=KaggleBotError fingerprint=e3780906cedd3cd49430

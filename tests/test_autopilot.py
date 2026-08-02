@@ -9554,3 +9554,226 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
     assert preserved_exc_info.value is original_error
     assert isinstance(original_error.__cause__, KernelFailedError)
     assert "produced no file changes" in str(original_error.__cause__)
+
+
+def test_kernel_fix_retries_when_authoritative_plan_supersedes_failed_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kagglebot.autopilot import _run_kernel_fix
+
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    iteration = 2
+    iter_dir = config.paths.iter_dir(run_id, iteration)
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    config.paths.plan_path.write_text(
+        json.dumps(
+            {
+                "stability_seeds": [2024, 777],
+                "pipelines": [
+                    {
+                        "name": "nested_oof_ensemble",
+                        "key_hyperparameters": {
+                            "stability_seed_1": 2024,
+                            "stability_seed_2": 777,
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    failed_stage_plan = config.paths.kernels_dir / run_id / f"local-iter-{iteration}" / "plan.json"
+    failed_stage_plan.parent.mkdir(parents=True, exist_ok=True)
+    failed_stage_plan.write_text(
+        json.dumps(
+            {
+                "stability_seeds": [2024, 777],
+                "pipelines": [
+                    {
+                        "name": "nested_cross_family_stacker",
+                        "key_hyperparameters": {"stability_seeds": [2024, 777]},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class DummyResult:
+        returncode = 0
+
+        def __init__(self, path: Path) -> None:
+            self.last_message_path = path
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_message_path = output_dir / "codex_last_message.txt"
+        last_message_path.write_text("no repository changes needed\n", encoding="utf-8")
+        return DummyResult(last_message_path)
+
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "oracle strategy")
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.kernel_regeneration_already_marked",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.maybe_regenerate_kernel_sources_once",
+        lambda **kwargs: False,
+    )
+    pending: list[dict[str, object]] = []
+    error = KernelFailedError(
+        "Local kernel staged plan contains unresolved hyperparameter sequences for pipeline "
+        "'nested_cross_family_stacker': key_hyperparameters.stability_seeds"
+    )
+
+    result = _run_kernel_fix(
+        config=config,
+        run_id=run_id,
+        iteration=iteration,
+        iter_dir=iter_dir,
+        error_message=str(error),
+        attempt=1,
+        pending_error_fixes=pending,
+        original_error=error,
+    )
+
+    assert result.repo_changed is False
+    assert result.regeneration_already_used is True
+    assert pending and pending[0]["resolved"] is True
+    assert "superseded the failed staged snapshot" in str(pending[0]["fix_summary"])
+
+
+def _canonical_metric_contract() -> dict[str, object]:
+    return {
+        "expected_metric": "balanced_accuracy",
+        "expected_direction": "maximize",
+        "accepted_score_sources": ["cv", "holdout"],
+        "require_trusted_score_source": True,
+    }
+
+
+def _canonical_metric_payload(metric_value: object) -> dict[str, object]:
+    return {
+        "metric_name": "balanced_accuracy",
+        "metric_value": metric_value,
+        "target_direction": "maximize",
+        "score_source": "cv",
+        "model_selection_trusted": True,
+    }
+
+
+@pytest.mark.parametrize("metric_value", [0.9485716414873678, 0.0])
+def test_contract_aware_metrics_accepts_canonical_metric_value(
+    tmp_path: Path,
+    metric_value: float,
+) -> None:
+    metrics_path = tmp_path / "current-output" / "metrics.json"
+    metrics_path.parent.mkdir(parents=True)
+    metrics = _canonical_metric_payload(metric_value)
+    metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+
+    evaluation = autopilot_mod._load_contract_aware_kernel_metrics(
+        metrics_path=metrics_path,
+        metrics=metrics,
+        direction="maximize",
+        target_metric="balanced_accuracy",
+        authoritative_contract=_canonical_metric_contract(),
+    )
+
+    assert evaluation is not None
+    assert evaluation.metric == "balanced_accuracy"
+    assert evaluation.direction == "maximize"
+    assert evaluation.score_source == "cv"
+    assert evaluation.value == pytest.approx(metric_value)
+
+
+@pytest.mark.parametrize(
+    ("metric_value", "reason"),
+    [
+        (True, "metric_value_not_numeric"),
+        ("0.9485", "metric_value_not_numeric"),
+        (None, "metric_value_not_numeric"),
+        (float("nan"), "metric_value_non_finite"),
+        (float("inf"), "metric_value_non_finite"),
+        (float("-inf"), "metric_value_non_finite"),
+    ],
+)
+def test_contract_aware_metrics_rejects_invalid_canonical_metric_values(
+    tmp_path: Path,
+    metric_value: object,
+    reason: str,
+) -> None:
+    metrics_path = tmp_path / "current-output" / "metrics.json"
+    metrics_path.parent.mkdir(parents=True)
+    metrics = _canonical_metric_payload(metric_value)
+
+    with pytest.raises(KernelFailedError, match=reason) as exc_info:
+        autopilot_mod._load_contract_aware_kernel_metrics(
+            metrics_path=metrics_path,
+            metrics=metrics,
+            direction="maximize",
+            target_metric="balanced_accuracy",
+            authoritative_contract=_canonical_metric_contract(),
+        )
+
+    message = str(exc_info.value)
+    assert f"metrics_path={metrics_path}" in message
+    assert "candidate_score_key=metric_value" in message
+    assert f"candidate_score_type={type(metric_value).__name__}" in message
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "issue"),
+    [
+        ("metric_name", "accuracy", "metric name does not match"),
+        ("target_direction", "minimize", "metric direction does not match"),
+        ("score_source", "cv_smoke", "score_source is not accepted"),
+        ("model_selection_trusted", False, "score is not explicitly trusted"),
+    ],
+)
+def test_contract_aware_metrics_rejects_canonical_contract_mismatches(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    issue: str,
+) -> None:
+    metrics_path = tmp_path / "current-output" / "metrics.json"
+    metrics_path.parent.mkdir(parents=True)
+    metrics = _canonical_metric_payload(0.9485716414873678)
+    metrics[field] = value
+
+    with pytest.raises(KernelFailedError, match="metric_contract_rejected") as exc_info:
+        autopilot_mod._load_contract_aware_kernel_metrics(
+            metrics_path=metrics_path,
+            metrics=metrics,
+            direction="maximize",
+            target_metric="balanced_accuracy",
+            authoritative_contract=_canonical_metric_contract(),
+        )
+
+    assert issue in str(exc_info.value)
+
+
+def test_contract_aware_metrics_does_not_fallback_from_invalid_canonical_value(
+    tmp_path: Path,
+) -> None:
+    metrics_path = tmp_path / "current-output" / "metrics.json"
+    metrics_path.parent.mkdir(parents=True)
+    metrics = _canonical_metric_payload("0.9485")
+    metrics["score"] = 0.5
+
+    with pytest.raises(KernelFailedError, match="metric_value_not_numeric"):
+        autopilot_mod._load_contract_aware_kernel_metrics(
+            metrics_path=metrics_path,
+            metrics=metrics,
+            direction="maximize",
+            target_metric="balanced_accuracy",
+            authoritative_contract=_canonical_metric_contract(),
+        )

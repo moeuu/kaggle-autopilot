@@ -12,6 +12,7 @@ from kagglebot.training_route import (
 
 def _ready_plan() -> dict[str, object]:
     return {
+        "deliverable_mode": "writeup",
         "runtime_budget": {
             "local_training_required": False,
             "estimated_local_training_min": 1_500,
@@ -21,7 +22,7 @@ def _ready_plan() -> dict[str, object]:
                 "validation_mode": "reference_reproduction",
                 "source": "kernel.py loads the attached frozen checkpoint and reproduces reference outputs",
             },
-        }
+        },
     }
 
 
@@ -33,17 +34,26 @@ def test_ready_non_training_path_skips_local_training() -> None:
     assert decision.mode == "pretrained_inference"
 
 
-def test_ready_code_competition_uses_direct_notebook_route() -> None:
+def test_autopilot_training_contract_cannot_use_direct_notebook_shortcut() -> None:
     decision = decide_training_route(
         _ready_plan(),
         compute="local_gpu",
         deliverable_mode="leaderboard",
         submit_mode="notebook",
         code_competition=True,
+        require_training=True,
     )
 
-    assert decision.skip_local_training is True
-    assert decision.direct_notebook is True
+    assert decision.skip_local_training is False
+    assert decision.direct_notebook is False
+    assert decision.reason == "training_required_by_autopilot"
+
+
+def test_autopilot_training_contract_applies_to_writeup_deliverables() -> None:
+    decision = decide_training_route(_ready_plan(), require_training=True)
+
+    assert decision.skip_local_training is False
+    assert decision.reason == "training_required_by_autopilot"
 
 
 def test_heavy_training_alone_does_not_skip_training() -> None:

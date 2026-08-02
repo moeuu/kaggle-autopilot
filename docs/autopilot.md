@@ -494,9 +494,13 @@ a previously submitted checkpoint. Use `--submit-policy none` for artifact gener
 Selection priority is `unsubmitted`, then `monetary prize`, then Kaggle `awardsPoints`/medal eligibility, then all other
 eligible entered competitions. Score and rank headroom order candidates only after those tier keys.
 Because `watch` only reads Kaggle's entered-competition group, a passed new-entrant deadline does not exclude a
-competition; only a passed submission deadline does. Unfamiliar competition types are passed through to autopilot
-instead of being filtered out at selection time; complex simulation/reasoning/optimization tasks receive larger
-training-time estimates so lightweight sidecars can still make capacity-aware choices.
+competition; only a passed submission deadline does. All entered competition types continue through bootstrap and
+planning. When Kaggle does not bundle labeled rows, the planner must construct a rules-permitted learning loop from
+public/reference tasks, the official practice evaluator, or leakage-safe generated examples, then update a proposer,
+reranker, calibrator, adapter, policy, or search distribution before packaging the required artifact. A watch run is
+recorded as `finished` only when its `run.json` has a successful terminal status and at least one completed iteration
+declares `trained=true`; static diagnostics and unscored artifacts cannot satisfy the watch success contract. Every
+plan uses `train_and_validate`, even when an agent proposes a non-training shortcut because local training is expensive.
 
 `watch` also runs a periodic and incident-driven self-improvement loop. The loop scans up to 500 historical runs by
 default, including submission outcomes, top1 gaps, diagnostics, submit failures, explicitly applied reusable skills,

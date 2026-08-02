@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kagglebot.hashing import sha256_file_or_none
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.submission.guard import normalize_error_text
 from kagglebot.submit_attempts import (
@@ -723,7 +724,14 @@ def save_submit_autofix_repaired_path_for_run(
     repaired_path: Path,
     save_run_state_for_run: Callable[[Path, dict[str, object]], object],
 ) -> None:
-    save_run_state_for_run(run_dir, {"submit_autofix_submission_path": str(repaired_path)})
+    updates: dict[str, object] = {
+        "submit_autofix_submission_path": str(repaired_path),
+        "last_submission_path": str(repaired_path),
+    }
+    repaired_sha256 = sha256_file_or_none(repaired_path)
+    if repaired_sha256 is not None:
+        updates["last_submission_sha256"] = repaired_sha256
+    save_run_state_for_run(run_dir, updates)
 
 
 def submit_file_fix_contract_satisfied_for_run(

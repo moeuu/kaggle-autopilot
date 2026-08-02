@@ -522,6 +522,9 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         if resume:
             set_resume_env(slug=candidate.slug, run_id=run_id)
         run_autopilot(autopilot_config)
+        completion_issue = _watch_training_completion_issue(paths=paths, run_id=run_id)
+        if completion_issue is not None:
+            raise RuntimeError(f"autopilot returned without completed model training: {completion_issue}")
     except MissingCompetitionDataError as exc:
         reason = "missing_competition_data"
         ledger.append(
@@ -1190,6 +1193,34 @@ def _prepare_competition(
             force=env_flag("KAGGLEBOT_REFRESH_EVALUATION_SPEC", default=False),
         )
         advisor.ensure_spec()
+
+
+def _watch_training_completion_issue(*, paths: CompetitionPaths, run_id: str) -> str | None:
+    run_dir = paths.run_dir(run_id)
+    run_path = run_dir / "run.json"
+    if not run_path.is_file():
+        # Test adapters and external runners may not persist the normal run contract.
+        return None
+    run_payload = load_json_object(run_path)
+    if not isinstance(run_payload, dict):
+        return "run.json is missing or invalid"
+    status = str(run_payload.get("status") or "").strip().lower()
+    if status not in {"completed", "submitted", "stopped", "manual_finalization_required"}:
+        return f"run status is {status or 'missing'}"
+
+    for state_path in sorted(run_dir.glob("iter-*/iteration_state.json")):
+        state = load_json_object(state_path)
+        if not isinstance(state, dict):
+            continue
+        if state.get("iteration_complete") is not True or state.get("trained") is not True:
+            continue
+        metrics_path = state.get("metrics_path")
+        if isinstance(metrics_path, str) and metrics_path.strip():
+            metrics = load_json_object(Path(metrics_path))
+            if isinstance(metrics, dict) and metrics.get("training_performed") is False:
+                continue
+        return None
+    return "no completed iteration declares trained=true"
 
 
 def _build_autopilot_config(

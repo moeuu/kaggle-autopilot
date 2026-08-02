@@ -87,6 +87,10 @@ from kagglebot.shapefile_artifacts import (
     same_stem_shapefile_exists,
     shapefile_component_suffix,
 )
+from kagglebot.submission_artifact_resolution import (
+    find_authoritative_submission_path,
+    is_known_submission_metadata,
+)
 from kagglebot.submission_artifacts import (
     ARTIFACT_CLASS_SINGLE_FILE,
     find_submission_manifest,
@@ -200,6 +204,9 @@ def find_submission_file(output_dir: Path) -> Path | None:
             return manifest_path
         if manifest_details.staging_dir is not None or manifest_details.members:
             return manifest_path
+    reported_submission = find_authoritative_submission_path(output_dir)
+    if reported_submission is not None:
+        return reported_submission
     preferred = _find_preferred_submission_candidate(output_dir, require_tabular_data_rows=True)
     if preferred is not None:
         return preferred
@@ -671,6 +678,8 @@ def _submission_candidate_is_usable(path: Path, *, require_tabular_data_rows: bo
     if not path.is_file() and not path.is_dir():
         return False
     if path.name.lower() in _CONFIGURED_SUBMISSION_EXCLUDED_NAMES:
+        return False
+    if is_known_submission_metadata(path):
         return False
     candidate_tabular_suffix = tabular_suffix(path)
     non_tabular_suffix = _non_tabular_single_file_suffix(path)
