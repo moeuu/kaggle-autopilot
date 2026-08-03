@@ -1415,7 +1415,7 @@ def test_run_watch_once_failure_is_recorded_and_next_cycle_selects_new_competiti
     assert attempts == ["first", "second"]
 
 
-def test_run_watch_once_cools_down_missing_data_block_and_selects_next_candidate(monkeypatch, tmp_path: Path) -> None:
+def test_run_watch_once_reports_missing_data_as_failed_and_selects_next_candidate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "kagglebot.supervisor.list_entered_competitions",
         lambda **kwargs: [_competition("blocked-data"), _competition("fresh")],
@@ -1441,16 +1441,19 @@ def test_run_watch_once_cools_down_missing_data_block_and_selects_next_candidate
     monkeypatch.setattr("kagglebot.supervisor.run_autopilot", fake_run_autopilot)
     config = _config(tmp_path)
 
-    blocked = run_watch_once(config)
+    failed = run_watch_once(config)
 
-    assert blocked.status == "blocked"
+    assert failed.status == "failed"
     state = json.loads(config.state_path.read_text(encoding="utf-8"))
     assert state["active_slug"] == "blocked-data"
-    assert state["active_run_id"] == blocked.run_id
-    assert state["last_status"] == "blocked"
+    assert state["active_run_id"] == failed.run_id
+    assert state["last_status"] == "failed"
     assert state["phase"] == "blocked_on_data"
     records = WatchLedger(config.ledger_path).records()
-    assert any(record.get("event") == "blocked" for record in records)
+    failure = next(record for record in records if record.get("event") == "failed")
+    assert failure["reason"] == "missing_competition_data"
+    assert failure["failure_kind"] == "blocked_on_data"
+    assert failure["retryable"] is True
     assert not any(record.get("event") == "finished" for record in records)
 
     resumed = run_watch_once(config)

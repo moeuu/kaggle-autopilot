@@ -47,7 +47,10 @@ def _find_training_sources(data_dir: Path, profile: dict[str, object]) -> list[P
         if not isinstance(value, str) or not value.strip():
             continue
         path = Path(value)
-        candidates.append(path if path.is_absolute() else data_dir / path)
+        candidate = path if path.is_absolute() else data_dir / path
+        candidates.append(candidate)
+        if not path.is_absolute() and not candidate.exists():
+            candidates.extend(match for match in data_dir.rglob(path.name) if match.is_file())
 
     candidates.extend(
         path
@@ -61,7 +64,7 @@ def _find_training_sources(data_dir: Path, profile: dict[str, object]) -> list[P
         if path.exists()
     )
     for pattern in ("train.*", "training.*", "train_labels.*", "labels.*"):
-        candidates.extend(path for path in data_dir.glob(pattern) if path.is_file())
+        candidates.extend(path for path in data_dir.rglob(pattern) if path.is_file())
 
     candidates.extend(_complete_training_archives(data_dir))
     return _dedupe_existing_nonempty_sources(candidates)

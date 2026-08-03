@@ -534,10 +534,12 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
     except MissingCompetitionDataError as exc:
         reason = "missing_competition_data"
         ledger.append(
-            "blocked",
+            "failed",
             slug=candidate.slug,
             run_id=run_id,
             reason=reason,
+            failure_kind="blocked_on_data",
+            retryable=True,
             error=str(exc),
         )
         write_watch_state(
@@ -545,12 +547,12 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
             {
                 "active_slug": candidate.slug,
                 "active_run_id": run_id,
-                "last_status": "blocked",
+                "last_status": "failed",
                 "phase": "blocked_on_data",
                 "reason": reason,
             },
         )
-        return WatchCycleResult(status="blocked", slug=candidate.slug, run_id=run_id, reason=str(exc))
+        return WatchCycleResult(status="failed", slug=candidate.slug, run_id=run_id, reason=str(exc))
     except RulesNotAcceptedError as exc:
         ledger.append("skipped", slug=candidate.slug, run_id=run_id, reason="rules_not_accepted")
         write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "skipped"})
