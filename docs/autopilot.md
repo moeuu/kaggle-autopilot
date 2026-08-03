@@ -619,11 +619,12 @@ Key files:
   `KAGGLEBOT_KAGGLE_GPU_HANDOFF_PROFILE=kaggle_t4` to override the default `kaggle_p100` profile.
 - For Kaggle kernel training, execution and logs are tracked through kernel run artifacts.
 - If autopilot crashes, restart with `--resume-run-id <run-id>` or `--resume-latest`.
-- A watch run that cannot find labeled data emits a terminal `failed` lifecycle notification with
-  `reason=missing_competition_data` and `failure_kind=blocked_on_data`. The run remains internally resumable: after a
-  non-empty authorized training source is staged, watch resumes the same run. Until then the competition follows the
-  normal watch cooldown, allowing another eligible competition to run without repeated start events. Training-source
-  discovery includes nested competition layouts such as `data/train_01/train.csv`, not only files at the data root.
+- A watch run that cannot find labeled data is recorded as `status=failed` and emits a terminal `failed` lifecycle
+  notification with `reason=missing_competition_data`, `failure_kind=blocked_on_data`, and `retryable=true`. That
+  explicit failure kind remains resumable: after a non-empty authorized training source is staged, watch resumes the
+  same run. Until then the competition follows the normal watch cooldown, allowing another eligible competition to run
+  without repeated start events. Training-source discovery includes nested competition layouts such as
+  `data/train_01/train.csv`, not only files at the data root.
 
 ## Submitted writeup competitions
 

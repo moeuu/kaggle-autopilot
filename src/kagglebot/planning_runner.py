@@ -121,8 +121,10 @@ def ensure_local_training_data_ready(config: PlanningRunConfig, run_id: str) -> 
         {
             "run_id": run_id,
             "slug": config.slug,
-            "status": "blocked_on_data",
+            "status": "failed",
             "blocked_reason": "missing_competition_data",
+            "failure_kind": "blocked_on_data",
+            "retryable": True,
             "data_readiness_reason": readiness.reason,
             "implementation_status": implementation.get("status", "unknown"),
             "training_performed": False,

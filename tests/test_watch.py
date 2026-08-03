@@ -1435,7 +1435,16 @@ def test_run_watch_once_reports_missing_data_as_failed_and_selects_next_candidat
             )
             run_dir = paths.run_dir(config.run_id)
             run_dir.mkdir(parents=True, exist_ok=True)
-            (run_dir / "run.json").write_text(json.dumps({"status": "blocked_on_data"}), encoding="utf-8")
+            (run_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "failure_kind": "blocked_on_data",
+                        "retryable": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
             raise MissingCompetitionDataError("data unavailable")
 
     monkeypatch.setattr("kagglebot.supervisor.run_autopilot", fake_run_autopilot)
@@ -1463,7 +1472,10 @@ def test_run_watch_once_reports_missing_data_as_failed_and_selects_next_candidat
     assert attempts == ["blocked-data", "fresh"]
 
 
-def test_run_watch_once_resumes_data_block_after_training_archive_is_staged(monkeypatch, tmp_path: Path) -> None:
+def test_run_watch_once_resumes_retryable_data_failure_after_training_archive_is_staged(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     config = _config(tmp_path)
     slug = "blocked-data"
     run_id = "20260422T000000Z-data1234"
@@ -1477,7 +1489,13 @@ def test_run_watch_once_resumes_data_block_after_training_archive_is_staged(monk
     )
     (paths.data_dir / "HAR.zip").write_bytes(b"staged training archive")
     (paths.run_dir(run_id) / "run.json").write_text(
-        json.dumps({"status": "blocked_on_data"}),
+        json.dumps(
+            {
+                "status": "failed",
+                "failure_kind": "blocked_on_data",
+                "retryable": True,
+            }
+        ),
         encoding="utf-8",
     )
     config.state_path.parent.mkdir(parents=True)
@@ -1486,7 +1504,7 @@ def test_run_watch_once_resumes_data_block_after_training_archive_is_staged(monk
             {
                 "active_slug": slug,
                 "active_run_id": run_id,
-                "last_status": "blocked",
+                "last_status": "failed",
                 "phase": "blocked_on_data",
                 "started_at": datetime.now(UTC).isoformat(),
             }

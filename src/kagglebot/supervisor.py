@@ -1747,7 +1747,10 @@ def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[
     if payload is None:
         return True
     status = str(payload.get("status") or "").strip().lower()
-    if status == "blocked_on_data":
+    resumable_data_failure = (
+        status == "failed" and payload.get("failure_kind") == "blocked_on_data" and payload.get("retryable") is True
+    )
+    if status == "blocked_on_data" or resumable_data_failure:
         return assess_local_training_data(paths).ready
     return status not in _TERMINAL_RUN_STATUSES
 

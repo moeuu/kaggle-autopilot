@@ -93,7 +93,7 @@ def test_run_plan_and_initial_auto_reports_oracle_when_available(monkeypatch, tm
     assert "oracle(latest-pro)" in phases[0][1]
 
 
-def test_required_local_training_is_resumably_blocked_when_labeled_data_is_missing(
+def test_required_local_training_is_retryable_failure_when_labeled_data_is_missing(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -132,8 +132,10 @@ def test_required_local_training_is_resumably_blocked_when_labeled_data_is_missi
         planning_runner.ensure_local_training_data_ready(config, "run-1")
 
     run_payload = json.loads((paths.run_dir("run-1") / "run.json").read_text(encoding="utf-8"))
-    assert run_payload["status"] == "blocked_on_data"
+    assert run_payload["status"] == "failed"
     assert run_payload["blocked_reason"] == "missing_competition_data"
+    assert run_payload["failure_kind"] == "blocked_on_data"
+    assert run_payload["retryable"] is True
     assert run_payload["implementation_status"] == "passed_contract_only"
     assert run_payload["training_performed"] is False
     assert run_payload["score_reported"] is False
