@@ -122,6 +122,13 @@ Oracle operational failures are handled by the dedicated strategy fallback rathe
 loop. When Oracle has already written a current response, Kagglebot validates that response even if the CLI later
 reports a cleanup error. Chat archival is attempted and reported separately, so an archival verification warning
 cannot replace or invalidate a usable Oracle answer.
+Browser conversations are verified through the authenticated remote-Chrome API when Oracle's own menu-based archive
+action fails. The verified result is persisted both beside the strategy output (`oracle_archive.json`) and back into
+the matching Oracle session metadata. Before the next browser consultation, Kagglebot also reconciles durable archive
+reports and retries a bounded number of completed Kagglebot-only sessions left pending by a timeout, SIGTERM, or parent
+process exit; recovery details are written to `oracle_archive_recovery.json`. Pytest refuses unmocked external Oracle
+and Codex strategy commands by default so tests cannot create real conversations or agent runs accidentally. An
+intentional integration test must set `KAGGLEBOT_ALLOW_EXTERNAL_AGENTS_IN_TESTS=1`.
 Resume skips planning only when the current run contains `planning_complete.json`, written after Oracle planning,
 sol-xhigh implementation, and repository verification all succeed. A plan or kernel left by an older or incomplete
 run cannot bypass the required Oracle attempt or its configured Codex fallback.

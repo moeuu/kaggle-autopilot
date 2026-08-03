@@ -281,6 +281,23 @@ def test_run_strategy_defaults_to_auto_and_uses_oracle_when_available(monkeypatc
     assert (tmp_path / "strategy_last_message.txt").read_text(encoding="utf-8") == "oracle strategy output\n"
 
 
+def test_run_strategy_blocks_unmocked_external_oracle_under_pytest(monkeypatch, tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_FALLBACK_CODEX", "0")
+    monkeypatch.setattr(strategy_runner, "_external_agent_execution_blocked_in_pytest", lambda: True)
+    monkeypatch.setattr(
+        strategy_runner,
+        "_maybe_start_oracle_browser",
+        lambda extra_args: (_ for _ in ()).throw(AssertionError("browser must not start")),
+    )
+
+    result = strategy_runner.run_strategy(prompt_path, tmp_path, dry_run=False, engine="oracle")
+
+    assert result.returncode == 126
+    assert "disabled under pytest" in result.stderr
+
+
 def test_run_strategy_oracle_does_not_treat_browser_error_transcript_as_response(monkeypatch, tmp_path: Path) -> None:
     prompt_path = tmp_path / "prompt.md"
     prompt_path.write_text("strategy prompt", encoding="utf-8")
@@ -449,6 +466,8 @@ def test_run_strategy_oracle_timeout_falls_back_to_sol_xhigh(monkeypatch, tmp_pa
     assert result.stdout == "Codex recovered the strategy"
     assert "timed out after 7200s" in result.stderr
     assert "timed out after 7200s" in (tmp_path / "oracle_strategy_exec.txt").read_text(encoding="utf-8")
+    archive_report = json.loads((tmp_path / "oracle_archive.json").read_text(encoding="utf-8"))
+    assert archive_report["fallbackReason"] == "missing-conversation-url-or-remote-chrome"
 
 
 def test_run_strategy_oracle_timeout_override_wins_over_global_timeout(monkeypatch, tmp_path: Path) -> None:
@@ -1024,6 +1043,201 @@ def test_archive_oracle_conversation_via_cdp_parses_success(monkeypatch, tmp_pat
 
     assert report["archived"] is True
     assert report["fallbackAttempted"] is True
+
+
+def test_recover_pending_oracle_archives_only_completed_kagglebot_sessions(monkeypatch, tmp_path: Path) -> None:
+    oracle_home = tmp_path / "oracle"
+    pending_dir = oracle_home / "sessions" / "pending-kagglebot"
+    duplicate_dir = oracle_home / "sessions" / "duplicate-kagglebot"
+    unrelated_dir = oracle_home / "sessions" / "unrelated"
+    pending_dir.mkdir(parents=True)
+    duplicate_dir.mkdir(parents=True)
+    unrelated_dir.mkdir(parents=True)
+    conversation_url = "https://chatgpt.com/c/pending-example"
+    pending_meta_path = pending_dir / "meta.json"
+    pending_meta_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "options": {
+                    "prompt": strategy_runner._ORACLE_BENIGN_USE_PREAMBLE + "Read the attached prompt.",
+                    "writeOutputPath": str(tmp_path / "missing" / "strategy_exec.txt"),
+                },
+                "browser": {
+                    "archive": {
+                        "mode": "always",
+                        "attempted": True,
+                        "archived": False,
+                        "reason": "conversation-menu-not-found",
+                        "conversationUrl": conversation_url,
+                    },
+                    "runtime": {"chromeHost": "127.0.0.1", "chromePort": 9333},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    duplicate_meta_path = duplicate_dir / "meta.json"
+    duplicate_meta_path.write_text(pending_meta_path.read_text(encoding="utf-8"), encoding="utf-8")
+    (unrelated_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "options": {
+                    "prompt": "unrelated Oracle request",
+                    "writeOutputPath": str(tmp_path / "other" / "strategy_exec.txt"),
+                },
+                "browser": {
+                    "archive": {
+                        "mode": "always",
+                        "archived": False,
+                        "conversationUrl": "https://chatgpt.com/c/unrelated",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str, int]] = []
+
+    def fake_archive(*, conversation_url: str, host: str, port: int) -> dict[str, object]:
+        calls.append((conversation_url, host, port))
+        return {"archived": True, "fallbackAttempted": True, "status": 200, "verificationStatus": 200}
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("ORACLE_HOME", str(oracle_home))
+    monkeypatch.setattr(strategy_runner, "_archive_oracle_conversation_via_cdp", fake_archive)
+
+    report = strategy_runner._recover_pending_oracle_archives(
+        output_dir=tmp_path / "current-output",
+        browser_bootstrap=strategy_runner.OracleBrowserBootstrap(args=[]),
+        extra_args=[],
+    )
+
+    assert calls == [(conversation_url, "127.0.0.1", 9333)]
+    assert report["pending"] == 2
+    assert report["uniqueConversations"] == 1
+    assert report["remoteAttempts"] == 1
+    assert report["archived"] == 2
+    updated_meta = json.loads(pending_meta_path.read_text(encoding="utf-8"))
+    assert updated_meta["browser"]["archive"]["archived"] is True
+    assert updated_meta["browser"]["archive"]["reason"] == "kagglebot-cdp-fallback"
+    assert updated_meta["browser"]["archive"]["oracleArchiveFailureReason"] == "conversation-menu-not-found"
+    duplicate_meta = json.loads(duplicate_meta_path.read_text(encoding="utf-8"))
+    assert duplicate_meta["browser"]["archive"]["archived"] is True
+    assert (tmp_path / "current-output" / "oracle_archive_recovery.json").exists()
+
+
+def test_recover_pending_oracle_archives_reconciles_durable_success_without_remote_call(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    oracle_home = tmp_path / "oracle"
+    session_dir = oracle_home / "sessions" / "completed-kagglebot"
+    session_dir.mkdir(parents=True)
+    output_dir = tmp_path / "prior-output"
+    output_dir.mkdir()
+    transcript_path = output_dir / "strategy_exec.txt"
+    transcript_path.write_text("completed response\n", encoding="utf-8")
+    (output_dir / "oracle_archive.json").write_text(
+        json.dumps(
+            {
+                "archived": True,
+                "conversationUrl": "https://chatgpt.com/c/already-archived",
+                "verificationStatus": 200,
+            }
+        ),
+        encoding="utf-8",
+    )
+    meta_path = session_dir / "meta.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "options": {
+                    "prompt": strategy_runner._ORACLE_BENIGN_USE_PREAMBLE + "Read the attached prompt.",
+                    "writeOutputPath": str(transcript_path),
+                },
+                "browser": {
+                    "archive": {
+                        "mode": "always",
+                        "archived": False,
+                        "conversationUrl": "https://chatgpt.com/c/already-archived",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("ORACLE_HOME", str(oracle_home))
+    monkeypatch.setattr(
+        strategy_runner,
+        "_archive_oracle_conversation_via_cdp",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("durable success must not call ChatGPT again")),
+    )
+
+    report = strategy_runner._recover_pending_oracle_archives(
+        output_dir=tmp_path / "current-output",
+        browser_bootstrap=strategy_runner.OracleBrowserBootstrap(args=[]),
+        extra_args=[],
+    )
+
+    assert report["reconciledFromReport"] == 1
+    assert report["remoteAttempts"] == 0
+    updated_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert updated_meta["browser"]["archive"]["archived"] is True
+
+
+def test_recover_pending_oracle_archives_records_deleted_conversation_as_terminal(monkeypatch, tmp_path: Path) -> None:
+    oracle_home = tmp_path / "oracle"
+    session_dir = oracle_home / "sessions" / "deleted-kagglebot"
+    session_dir.mkdir(parents=True)
+    meta_path = session_dir / "meta.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "options": {
+                    "prompt": strategy_runner._ORACLE_BENIGN_USE_PREAMBLE + "Read the attached prompt.",
+                    "writeOutputPath": str(tmp_path / "missing" / "strategy_exec.txt"),
+                },
+                "browser": {
+                    "archive": {
+                        "mode": "always",
+                        "archived": False,
+                        "conversationUrl": "https://chatgpt.com/c/deleted",
+                    },
+                    "runtime": {"chromeHost": "127.0.0.1", "chromePort": 9222},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("ORACLE_HOME", str(oracle_home))
+    monkeypatch.setattr(
+        strategy_runner,
+        "_archive_oracle_conversation_via_cdp",
+        lambda **kwargs: {
+            "archived": False,
+            "fallbackAttempted": True,
+            "status": 404,
+            "response": json.dumps({"detail": {"code": "conversation_deleted"}}),
+        },
+    )
+
+    report = strategy_runner._recover_pending_oracle_archives(
+        output_dir=tmp_path / "current-output",
+        browser_bootstrap=strategy_runner.OracleBrowserBootstrap(args=[]),
+        extra_args=[],
+    )
+
+    assert report["terminal"] == 1
+    assert report["failed"] == 0
+    updated_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert updated_meta["browser"]["archive"]["kagglebotTerminalState"] == "conversation-deleted"
+    assert strategy_runner._is_pending_kagglebot_oracle_archive(updated_meta) is False
 
 
 def test_start_oracle_browser_attachment_compatibility_uses_exact_filenames(monkeypatch, tmp_path: Path) -> None:

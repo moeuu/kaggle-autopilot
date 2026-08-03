@@ -23,6 +23,7 @@ from kagglebot.agents.sandbox_fallback import (
 )
 from kagglebot.exec_utils import CommandResult, run_command
 
+_ORIGINAL_RUN_COMMAND = run_command
 _DEFAULT_MODEL = STRATEGY_AGENT.model
 _DEFAULT_REASONING_EFFORT = STRATEGY_AGENT.reasoning_effort
 _DEFAULT_TIMEOUT_SEC = 600.0
@@ -41,6 +42,7 @@ _DEFAULT_ORACLE_FILE_SIZE_LIMIT_BYTES = 1024 * 1024
 _ORACLE_RUNTIME_CONTEXT_FILE_MAX_BYTES = 4 * 1024 * 1024
 _ORACLE_RUNTIME_CONTEXT_TOTAL_MAX_BYTES = 16 * 1024 * 1024
 _ORACLE_REMOTE_DATA_PART_BYTES = 15 * 1024 * 1024
+_ORACLE_ARCHIVE_RECOVERY_LIMIT = 10
 _ORACLE_CANONICAL_CONTEXT_FILES = (
     "rules_url.txt",
     "rules.md",
@@ -183,6 +185,38 @@ def run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False, 
     return _run_codex_strategy(prompt_path, output_dir, dry_run=dry_run)
 
 
+def _external_agent_execution_blocked_in_pytest() -> bool:
+    return (
+        bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        and run_command is _ORIGINAL_RUN_COMMAND
+        and not _env_flag("KAGGLEBOT_ALLOW_EXTERNAL_AGENTS_IN_TESTS", default=False)
+    )
+
+
+def _pytest_external_agent_blocked_result(
+    *,
+    transcript_path: Path,
+    last_message_path: Path,
+    engine: str,
+) -> StrategyResult:
+    message = (
+        f"External {engine} strategy execution is disabled under pytest; "
+        "mock the strategy runner or set KAGGLEBOT_ALLOW_EXTERNAL_AGENTS_IN_TESTS=1 "
+        "for an intentional integration test."
+    )
+    transcript_path.write_text(message + "\n", encoding="utf-8")
+    last_message_path.write_text(message + "\n", encoding="utf-8")
+    return StrategyResult(
+        transcript_path=transcript_path,
+        last_message_path=last_message_path,
+        returncode=126,
+        stdout=message,
+        stderr=message,
+        sandbox_policy_mode="external" if engine == "oracle" else resolve_agent_sandbox_mode(),
+        engine=engine,
+    )
+
+
 def _run_codex_strategy(
     prompt_path: Path,
     output_dir: Path,
@@ -206,6 +240,13 @@ def _run_codex_strategy(
             stdout="",
             stderr="",
             sandbox_policy_mode=resolve_agent_sandbox_mode(),
+            engine="codex",
+        )
+
+    if _external_agent_execution_blocked_in_pytest():
+        return _pytest_external_agent_blocked_result(
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
             engine="codex",
         )
 
@@ -372,6 +413,13 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
             engine="oracle",
         )
 
+    if _external_agent_execution_blocked_in_pytest():
+        return _pytest_external_agent_blocked_result(
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
+            engine="oracle",
+        )
+
     model = resolve_oracle_model()
     consult_prompt = (
         _ORACLE_BENIGN_USE_PREAMBLE
@@ -404,6 +452,18 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
     )
     attachment_paths = list(attachment_plan.paths)
     browser_bootstrap = _maybe_start_oracle_browser(extra_args)
+    if _oracle_browser_engine_requested(extra_args) and run_command is _ORIGINAL_RUN_COMMAND:
+        try:
+            _recover_pending_oracle_archives(
+                output_dir=output_dir,
+                browser_bootstrap=browser_bootstrap,
+                extra_args=extra_args,
+            )
+        except Exception as exc:  # Recovery is best-effort and must not block a new strategy response.
+            print(
+                f"oracle strategy: warning: pending archive recovery failed ({type(exc).__name__}: {exc})",
+                flush=True,
+            )
     args = [
         *command,
         *_oracle_engine_args(extra_args),
@@ -437,25 +497,17 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         args=[*extra_args, *browser_bootstrap.args],
         attachment_paths=attachment_paths,
     )
+    archive_report: dict[str, object] | None = None
+    oracle_command_attempted = False
     try:
-        archive_report: dict[str, object] | None = None
         try:
             transcript_path.unlink(missing_ok=True)
             last_message_path.unlink(missing_ok=True)
             (output_dir / "oracle_archive.json").unlink(missing_ok=True)
+            oracle_command_attempted = True
             result = run_command(args, timeout=timeout)
-            written_text = (
-                transcript_path.read_text(encoding="utf-8", errors="ignore") if transcript_path.exists() else ""
-            )
-            written_response = bool(written_text.strip()) and not _oracle_transcript_is_cli_failure(written_text)
-            if _oracle_browser_engine_requested(extra_args) and (result.returncode == 0 or written_response):
-                archive_report = _ensure_oracle_conversation_archived(
-                    transcript_path=transcript_path,
-                    output_dir=output_dir,
-                    browser_bootstrap=browser_bootstrap,
-                    extra_args=extra_args,
-                )
         except FileNotFoundError:
+            oracle_command_attempted = False
             message = f"Oracle strategy runner unavailable: executable not found: {command[0]}"
             transcript_path.write_text(message + "\n", encoding="utf-8")
             last_message_path.write_text(message + "\n", encoding="utf-8")
@@ -485,6 +537,24 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
             engine="oracle",
         )
     finally:
+        if oracle_command_attempted and _oracle_browser_engine_requested(extra_args):
+            try:
+                archive_report = _ensure_oracle_conversation_archived(
+                    transcript_path=transcript_path,
+                    output_dir=output_dir,
+                    browser_bootstrap=browser_bootstrap,
+                    extra_args=extra_args,
+                )
+            except Exception as exc:  # Archival cleanup must never discard a usable Oracle response.
+                archive_report = {
+                    "archived": False,
+                    "fallbackAttempted": True,
+                    "fallbackReason": f"archive-cleanup-error:{type(exc).__name__}:{exc}",
+                }
+                (output_dir / "oracle_archive.json").write_text(
+                    json.dumps(archive_report, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
         stop_event.set()
         heartbeat.join(timeout=1.0)
         browser_compatibility.close()
@@ -1139,6 +1209,7 @@ def _ensure_oracle_conversation_archived(
             time.sleep(float(attempt))
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if report.get("archived") is True:
+        _record_oracle_session_archive_success(report)
         print("oracle strategy: archived ChatGPT conversation", flush=True)
     else:
         print(
@@ -1147,6 +1218,279 @@ def _ensure_oracle_conversation_archived(
             flush=True,
         )
     return report
+
+
+def _recover_pending_oracle_archives(
+    *,
+    output_dir: Path,
+    browser_bootstrap: OracleBrowserBootstrap,
+    extra_args: list[str],
+) -> dict[str, object]:
+    """Archive completed Kagglebot Oracle chats left behind by an interrupted parent process."""
+    summary: dict[str, object] = {
+        "examined": 0,
+        "pending": 0,
+        "reconciledFromReport": 0,
+        "remoteAttempts": 0,
+        "archived": 0,
+        "terminal": 0,
+        "failed": 0,
+        "sessions": [],
+    }
+    if _oracle_archive_mode(extra_args) == "never" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return summary
+    sessions_root = _oracle_sessions_root()
+    if not sessions_root.is_dir():
+        return summary
+    default_remote = _oracle_remote_chrome_endpoint(browser_bootstrap.args or extra_args)
+    try:
+        meta_paths = sorted(
+            sessions_root.glob("*/meta.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return summary
+
+    session_reports: list[dict[str, object]] = []
+    conversation_results: dict[str, dict[str, object]] = {}
+    conversation_urls: set[str] = set()
+    remote_attempts = 0
+    for meta_path in meta_paths[:100]:
+        payload = _read_json_object(meta_path)
+        if not _is_pending_kagglebot_oracle_archive(payload):
+            continue
+        summary["examined"] = int(summary["examined"]) + 1
+        summary["pending"] = int(summary["pending"]) + 1
+        archive = _oracle_archive_payload(payload)
+        conversation_url = _oracle_session_conversation_url(payload)
+        if conversation_url:
+            conversation_urls.add(conversation_url)
+        session_report: dict[str, object] = {
+            "oracleSession": str(meta_path.parent),
+            "conversationUrl": conversation_url,
+        }
+
+        durable_report = _oracle_durable_archive_report(payload)
+        if durable_report.get("archived") is True:
+            session_report.update(durable_report)
+            session_report["oracleSession"] = str(meta_path.parent)
+            session_report["recoveredBy"] = "durable-report"
+            if _record_oracle_session_archive_success({**session_report, "oracleSession": str(meta_path.parent)}):
+                summary["reconciledFromReport"] = int(summary["reconciledFromReport"]) + 1
+                summary["archived"] = int(summary["archived"]) + 1
+            session_reports.append(session_report)
+            continue
+
+        remote = _oracle_session_remote_chrome_endpoint(payload) or default_remote
+        if not conversation_url or remote is None:
+            session_report.update(
+                {
+                    "archived": False,
+                    "fallbackAttempted": False,
+                    "fallbackReason": "missing-conversation-url-or-remote-chrome",
+                }
+            )
+            summary["failed"] = int(summary["failed"]) + 1
+            session_reports.append(session_report)
+            continue
+
+        result = conversation_results.get(conversation_url)
+        if result is None:
+            if remote_attempts >= _ORACLE_ARCHIVE_RECOVERY_LIMIT:
+                session_report.update({"archived": False, "fallbackReason": "recovery-limit-reached"})
+                session_reports.append(session_report)
+                continue
+            remote_attempts += 1
+            summary["remoteAttempts"] = remote_attempts
+            host, port = remote
+            result = _archive_oracle_conversation_via_cdp(
+                conversation_url=conversation_url,
+                host=host,
+                port=port,
+            )
+            conversation_results[conversation_url] = result
+        session_report.update(archive)
+        session_report.update(result)
+        session_report["recoveredBy"] = "cdp-fallback"
+        if result.get("archived") is True:
+            _record_oracle_session_archive_success({**session_report, "oracleSession": str(meta_path.parent)})
+            summary["archived"] = int(summary["archived"]) + 1
+        elif _oracle_archive_target_deleted(result):
+            _record_oracle_session_archive_terminal(
+                {**session_report, "oracleSession": str(meta_path.parent)},
+                terminal_state="conversation-deleted",
+            )
+            session_report["archiveTerminalState"] = "conversation-deleted"
+            summary["terminal"] = int(summary["terminal"]) + 1
+        else:
+            summary["failed"] = int(summary["failed"]) + 1
+        session_reports.append(session_report)
+
+    summary["sessions"] = session_reports
+    summary["uniqueConversations"] = len(conversation_urls)
+    if session_reports:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "oracle_archive_recovery.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            "oracle strategy: recovered pending ChatGPT archives "
+            f"(archived={summary['archived']}, terminal={summary['terminal']}, failed={summary['failed']})",
+            flush=True,
+        )
+    return summary
+
+
+def _oracle_sessions_root() -> Path:
+    return Path(os.environ.get("ORACLE_HOME", str(Path.home() / ".oracle"))).expanduser() / "sessions"
+
+
+def _read_json_object(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _oracle_archive_payload(payload: dict[str, object]) -> dict[str, object]:
+    browser = payload.get("browser")
+    archive = browser.get("archive") if isinstance(browser, dict) else None
+    return dict(archive) if isinstance(archive, dict) else {}
+
+
+def _is_pending_kagglebot_oracle_archive(payload: dict[str, object]) -> bool:
+    if str(payload.get("status") or "").lower() != "completed":
+        return False
+    options = payload.get("options")
+    if not isinstance(options, dict):
+        return False
+    prompt = str(options.get("prompt") or "")
+    output_path = Path(str(options.get("writeOutputPath") or ""))
+    archive = _oracle_archive_payload(payload)
+    return (
+        prompt.startswith(_ORACLE_BENIGN_USE_PREAMBLE)
+        and output_path.name == "strategy_exec.txt"
+        and archive.get("archived") is not True
+        and not archive.get("kagglebotTerminalState")
+        and str(archive.get("mode") or "always").lower() != "never"
+    )
+
+
+def _oracle_durable_archive_report(payload: dict[str, object]) -> dict[str, object]:
+    options = payload.get("options")
+    if not isinstance(options, dict):
+        return {}
+    output_path = Path(str(options.get("writeOutputPath") or ""))
+    if output_path.name != "strategy_exec.txt":
+        return {}
+    return _read_json_object(output_path.with_name("oracle_archive.json"))
+
+
+def _oracle_session_conversation_url(payload: dict[str, object]) -> str:
+    archive = _oracle_archive_payload(payload)
+    browser = payload.get("browser")
+    runtime = browser.get("runtime") if isinstance(browser, dict) else None
+    for value in (
+        archive.get("conversationUrl"),
+        browser.get("conversationUrl") if isinstance(browser, dict) else None,
+        runtime.get("tabUrl") if isinstance(runtime, dict) else None,
+    ):
+        normalized = str(value or "").strip()
+        if normalized:
+            return normalized
+    conversation_id = str(runtime.get("conversationId") or "").strip() if isinstance(runtime, dict) else ""
+    return f"https://chatgpt.com/c/{conversation_id}" if conversation_id else ""
+
+
+def _oracle_session_remote_chrome_endpoint(payload: dict[str, object]) -> tuple[str, int] | None:
+    browser = payload.get("browser")
+    runtime = browser.get("runtime") if isinstance(browser, dict) else None
+    if not isinstance(runtime, dict):
+        return None
+    host = str(runtime.get("chromeHost") or "127.0.0.1").strip() or "127.0.0.1"
+    try:
+        port = int(runtime.get("chromePort"))
+    except (TypeError, ValueError):
+        return None
+    return host, port
+
+
+def _record_oracle_session_archive_success(report: dict[str, object]) -> bool:
+    return _update_oracle_session_archive(
+        report,
+        {
+            "attempted": True,
+            "archived": True,
+            "reason": "kagglebot-cdp-fallback",
+            "kagglebotTerminalState": None,
+        },
+    )
+
+
+def _record_oracle_session_archive_terminal(report: dict[str, object], *, terminal_state: str) -> bool:
+    return _update_oracle_session_archive(
+        report,
+        {
+            "attempted": True,
+            "archived": False,
+            "kagglebotTerminalState": terminal_state,
+        },
+    )
+
+
+def _update_oracle_session_archive(report: dict[str, object], updates: dict[str, object]) -> bool:
+    raw_session_dir = str(report.get("oracleSession") or "").strip()
+    if not raw_session_dir:
+        return False
+    session_dir = Path(raw_session_dir)
+    meta_path = session_dir / "meta.json"
+    payload = _read_json_object(meta_path)
+    if not payload:
+        return False
+    browser = payload.get("browser")
+    if not isinstance(browser, dict):
+        browser = {}
+        payload["browser"] = browser
+    archive = browser.get("archive")
+    if not isinstance(archive, dict):
+        archive = {}
+        browser["archive"] = archive
+    previous_reason = str(archive.get("reason") or "").strip()
+    archive.update(updates)
+    archive.update(
+        {
+            "conversationUrl": str(report.get("conversationUrl") or archive.get("conversationUrl") or ""),
+            "kagglebotVerifiedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    )
+    if previous_reason and archive.get("reason") == "kagglebot-cdp-fallback":
+        archive["oracleArchiveFailureReason"] = previous_reason
+    temp_path = meta_path.with_name(f".{meta_path.name}.kagglebot-{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temp_path, meta_path)
+    except OSError:
+        temp_path.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def _oracle_archive_target_deleted(report: dict[str, object]) -> bool:
+    try:
+        status = int(report.get("status") or 0)
+    except (TypeError, ValueError):
+        return False
+    if status != 404:
+        return False
+    try:
+        response = json.loads(str(report.get("response") or ""))
+    except ValueError:
+        return False
+    detail = response.get("detail") if isinstance(response, dict) else None
+    return isinstance(detail, dict) and str(detail.get("code") or "") == "conversation_deleted"
 
 
 def _oracle_archive_mode(extra_args: list[str]) -> str:
@@ -1159,7 +1503,7 @@ def _oracle_archive_mode(extra_args: list[str]) -> str:
 
 
 def _find_oracle_session_archive_status(transcript_path: Path) -> dict[str, object]:
-    sessions_root = Path(os.environ.get("ORACLE_HOME", str(Path.home() / ".oracle"))).expanduser() / "sessions"
+    sessions_root = _oracle_sessions_root()
     if not sessions_root.is_dir():
         return {}
     expected = str(transcript_path.resolve())
@@ -1169,10 +1513,7 @@ def _find_oracle_session_archive_status(transcript_path: Path) -> dict[str, obje
         reverse=True,
     )
     for meta_path in meta_paths[:100]:
-        try:
-            payload = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
+        payload = _read_json_object(meta_path)
         options = payload.get("options") if isinstance(payload, dict) else None
         if not isinstance(options, dict) or str(options.get("writeOutputPath") or "") != expected:
             continue
