@@ -1329,12 +1329,12 @@ def _recover_pending_oracle_archives(
 
     summary["sessions"] = session_reports
     summary["uniqueConversations"] = len(conversation_urls)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "oracle_archive_recovery.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     if session_reports:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "oracle_archive_recovery.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
         print(
             "oracle strategy: recovered pending ChatGPT archives "
             f"(archived={summary['archived']}, terminal={summary['terminal']}, failed={summary['failed']})",

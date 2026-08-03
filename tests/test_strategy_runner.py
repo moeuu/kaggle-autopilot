@@ -1125,7 +1125,17 @@ def test_recover_pending_oracle_archives_only_completed_kagglebot_sessions(monke
     assert updated_meta["browser"]["archive"]["oracleArchiveFailureReason"] == "conversation-menu-not-found"
     duplicate_meta = json.loads(duplicate_meta_path.read_text(encoding="utf-8"))
     assert duplicate_meta["browser"]["archive"]["archived"] is True
-    assert (tmp_path / "current-output" / "oracle_archive_recovery.json").exists()
+    recovery_report_path = tmp_path / "current-output" / "oracle_archive_recovery.json"
+    assert recovery_report_path.exists()
+
+    second_report = strategy_runner._recover_pending_oracle_archives(
+        output_dir=tmp_path / "current-output",
+        browser_bootstrap=strategy_runner.OracleBrowserBootstrap(args=[]),
+        extra_args=[],
+    )
+
+    assert second_report["pending"] == 0
+    assert json.loads(recovery_report_path.read_text(encoding="utf-8"))["pending"] == 0
 
 
 def test_recover_pending_oracle_archives_reconciles_durable_success_without_remote_call(
