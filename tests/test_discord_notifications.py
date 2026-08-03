@@ -916,6 +916,63 @@ def test_started_lifecycle_is_immediately_updated_to_current_oracle_phase(tmp_pa
     assert notifier.events[0]["payload"]["discord_update_key"] == notifier.events[-1]["payload"]["discord_update_key"]
 
 
+def test_historical_failure_replay_does_not_restart_current_run_notification(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    watch_dir = artifacts / "_watch"
+    run_dir = artifacts / "current-comp" / "runs" / "current-run"
+    watch_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (watch_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "active_slug": "current-comp",
+                "active_run_id": "current-run",
+                "last_status": "running",
+                "phase": "preparing_data",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run.json").write_text(json.dumps({"status": "running"}), encoding="utf-8")
+    current_started_key = "kaggle-autopilot:local_gpu:autopilot.started:current-comp:current-run"
+    (watch_dir / "discord_notifier_state.json").write_text(
+        json.dumps(
+            {
+                LEDGER_CURSOR_INITIALIZED_KEY: True,
+                LEDGER_OFFSET_KEY: 0,
+                DELIVERED_LIFECYCLE_KEYS: [current_started_key],
+                "last_run_id": "current-run",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (watch_dir / "ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-04-23T00:00:00+00:00",
+                "event": "failed",
+                "slug": "historical-comp",
+                "run_id": "historical-run",
+                "reason": "missing_competition_data",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    notifier = RecordingNotifier()
+
+    assert run_discord_notifier_once(
+        artifacts_dir=artifacts,
+        heartbeat_sec=1800,
+        notifier=notifier,
+        now=datetime(2026, 4, 23, 0, 1, tzinfo=UTC),
+    )
+
+    assert [event["event_type"] for event in notifier.events] == ["autopilot.failed", "autopilot.status"]
+    assert notifier.events[-1]["payload"]["competition"] == "current-comp"
+    assert notifier.events[-1]["payload"]["phase"] == "preparing_data"
+
+
 def test_run_discord_notifier_once_retries_lifecycle_without_advancing_cursor(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"

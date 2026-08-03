@@ -252,7 +252,11 @@ def _run_discord_notifier_for_watch_state(
     event_type = _event_type_for_snapshot(snapshot)
     current_run_id = _clean_str(snapshot.get("run_id"))
     last_run_id = _clean_str(state.get("last_run_id"))
-    if current_run_id and current_run_id != last_run_id:
+    started_lifecycle_delivered = _lifecycle_dedupe_key(
+        payload=snapshot,
+        event_type="autopilot.started",
+    ) in _delivered_lifecycle_keys(state)
+    if current_run_id and current_run_id != last_run_id and not started_lifecycle_delivered:
         event_type = "autopilot.started"
     last_key = str(state.get("last_snapshot_key") or "")
     last_sent_at = _parse_datetime(state.get("last_sent_at"))
