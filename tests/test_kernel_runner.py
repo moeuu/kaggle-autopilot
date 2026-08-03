@@ -66,6 +66,38 @@ from kagglebot.submission_sample_discovery import TABULAR_INPUT_SUFFIXES
 
 pytestmark = pytest.mark.slow
 
+_PANDAS_READER_NAMES = (
+    "read_csv",
+    "read_parquet",
+    "read_orc",
+    "read_json",
+    "read_excel",
+    "read_feather",
+    "read_hdf",
+    "read_stata",
+    "read_sas",
+    "read_spss",
+    "read_html",
+    "read_xml",
+    "read_pickle",
+)
+_ORIGINAL_PANDAS_READERS = {name: getattr(pd, name) for name in _PANDAS_READER_NAMES}
+_ORIGINAL_DATAFRAME_GETITEM = pd.DataFrame.__getitem__
+
+
+@pytest.fixture(autouse=True)
+def _isolate_generated_pandas_shims() -> None:
+    """Keep runpy-loaded sitecustomize shims from leaking between tests in one xdist worker."""
+
+    def restore() -> None:
+        for name, reader in _ORIGINAL_PANDAS_READERS.items():
+            setattr(pd, name, reader)
+        pd.DataFrame.__getitem__ = _ORIGINAL_DATAFRAME_GETITEM
+
+    restore()
+    yield
+    restore()
+
 
 def test_local_output_filename_uses_required_writeup_artifact(tmp_path: Path) -> None:
     competition_dir = tmp_path / "demo"
