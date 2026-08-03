@@ -8,6 +8,7 @@ from pytest import MonkeyPatch
 
 import kagglebot.discord_notifications as discord_notifications
 from kagglebot.discord_notifications import (
+    DELIVERED_LIFECYCLE_KEYS,
     DELIVERY_RECEIPTS_FILENAME,
     LEDGER_CURSOR_INITIALIZED_KEY,
     LEDGER_OFFSET_KEY,
@@ -818,6 +819,48 @@ def test_run_discord_notifier_once_replays_lifecycle_events_from_watch_ledger(tm
     assert notifier.events[1]["payload"]["submission_url"].endswith("/writeups/demo")
     notifier_state = _read_json_object(watch_dir / "discord_notifier_state.json")
     assert notifier_state[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
+    assert notifier_state[DELIVERED_LIFECYCLE_KEYS] == [
+        "kaggle-autopilot:local_gpu:autopilot.started:first-comp:run-1",
+        "kaggle-autopilot:local_gpu:autopilot.finished:first-comp:run-1",
+    ]
+
+
+def test_run_discord_notifier_once_suppresses_duplicate_started_lifecycle(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    watch_dir = artifacts / "_watch"
+    watch_dir.mkdir(parents=True)
+    (watch_dir / "state.json").write_text(json.dumps({"last_status": "finished"}), encoding="utf-8")
+    (watch_dir / "discord_notifier_state.json").write_text(
+        json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0}),
+        encoding="utf-8",
+    )
+    ledger_path = watch_dir / "ledger.jsonl"
+    ledger_path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "ts": f"2026-04-23T0{hour}:00:00+00:00",
+                    "event": "started",
+                    "slug": "demo",
+                    "run_id": "run-1",
+                }
+            )
+            for hour in (0, 1, 2)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    notifier = RecordingNotifier()
+
+    assert run_discord_notifier_once(
+        artifacts_dir=artifacts,
+        heartbeat_sec=1800,
+        notifier=notifier,
+        now=datetime(2026, 4, 23, 3, 0, tzinfo=UTC),
+    )
+
+    assert [event["event_type"] for event in notifier.events] == ["autopilot.started"]
+    assert _read_json_object(watch_dir / "discord_notifier_state.json")[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
 
 
 def test_started_lifecycle_is_immediately_updated_to_current_oracle_phase(tmp_path: Path) -> None:

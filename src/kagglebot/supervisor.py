@@ -419,11 +419,13 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         candidate = _candidate_from_slug(active_slug)
         run_id = active_run_id
         resume = True
+        lifecycle_event = "resumed"
         ledger.append("selected", slug=active_slug, run_id=run_id, reason="resume_active")
     elif active_slug and active_run_id and _preflight_can_restart(config, active_slug, active_run_id, state=state):
         candidate = _candidate_from_slug(active_slug)
         run_id = active_run_id
         resume = False
+        lifecycle_event = "resumed"
         ledger.append("selected", slug=active_slug, run_id=run_id, reason="restart_preflight")
     else:
         if active_slug and active_run_id and active_state_is_stale(state):
@@ -466,6 +468,7 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         candidate = candidates[0]
         run_id = new_run_id()
         resume = False
+        lifecycle_event = "started"
         ledger.append("selected", slug=candidate.slug, run_id=run_id, reason="best_candidate")
 
     if config.dry_run:
@@ -473,17 +476,20 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         print(f"[yellow]DRY RUN[/yellow]: would run autopilot for {candidate.slug} ({run_id})")
         return WatchCycleResult(status="dry_run", slug=candidate.slug, run_id=run_id)
 
+    started_at = (str(state.get("started_at") or "").strip() if lifecycle_event == "resumed" else "") or datetime.now(
+        UTC
+    ).isoformat()
     write_watch_state(
         config.state_path,
         {
             "active_slug": candidate.slug,
             "active_run_id": run_id,
-            "started_at": datetime.now(UTC).isoformat(),
+            "started_at": started_at,
             "last_status": "running",
             "phase": "bootstrapping",
         },
     )
-    ledger.append("started", slug=candidate.slug, run_id=run_id, resume=resume)
+    ledger.append(lifecycle_event, slug=candidate.slug, run_id=run_id, resume=resume)
 
     paths = CompetitionPaths(
         slug=candidate.slug,
@@ -507,7 +513,7 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
             {
                 "active_slug": candidate.slug,
                 "active_run_id": run_id,
-                "started_at": datetime.now(UTC).isoformat(),
+                "started_at": started_at,
                 "last_status": "running",
                 "phase": "autopilot_starting",
             },

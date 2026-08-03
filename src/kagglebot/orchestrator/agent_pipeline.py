@@ -160,7 +160,6 @@ class KernelContractSmokeResult:
             self.normal_smoke_required
             and self.allow_missing_training_data
             and self.data_ready is False
-            and self.data_readiness_reason == "dataset_profile_missing_required_files"
             and report.get("data_free") is True
             and report.get("training_performed") is False
             and report.get("score_reported") is False
@@ -1786,6 +1785,11 @@ def _run_kernel_contract_smoke(
 ) -> KernelContractSmokeResult:
     pipeline_issues = _diagnose_missing_pipeline_lookups(kernel_path, paths.plan_path)
     data_readiness = assess_local_training_data(paths)
+    training_data_available = data_readiness.ready is True
+    training_data_unavailable = data_readiness.ready is False
+    missing_data_probe_expected = training_data_unavailable and (
+        data_readiness.reason == "dataset_profile_missing_required_files" or _plan_uses_writeup_deliverable(paths)
+    )
     allow_missing_training_data = _plan_allows_missing_training_data(paths)
     if not kernel_path.is_file():
         return KernelContractSmokeResult(
@@ -1796,7 +1800,7 @@ def _run_kernel_contract_smoke(
             smoke_stdout="",
             smoke_stderr="compile failed; runtime smoke was not attempted",
             pipeline_issues=pipeline_issues,
-            data_ready=data_readiness.ready,
+            data_ready=training_data_available,
             data_readiness_reason=data_readiness.reason,
             allow_missing_training_data=allow_missing_training_data,
         )
@@ -1852,7 +1856,7 @@ def _run_kernel_contract_smoke(
                 smoke_stdout="",
                 smoke_stderr="compile failed; runtime smoke was not attempted",
                 pipeline_issues=pipeline_issues,
-                data_ready=data_readiness.ready,
+                data_ready=training_data_available,
                 data_readiness_reason=data_readiness.reason,
                 allow_missing_training_data=allow_missing_training_data,
                 compile_timed_out=compile_result[3],
@@ -1873,7 +1877,7 @@ def _run_kernel_contract_smoke(
                     "generated kernel must export callable `contract_smoke()` without loading competition "
                     "training data",
                 ),
-                data_ready=data_readiness.ready,
+                data_ready=training_data_available,
                 data_readiness_reason=data_readiness.reason,
                 allow_missing_training_data=allow_missing_training_data,
                 compile_timed_out=compile_result[3],
@@ -1902,14 +1906,10 @@ def _run_kernel_contract_smoke(
                 warnings=validation_warnings,
             )
         )
-        if (
-            allow_missing_training_data
-            and not data_readiness.ready
-            and data_readiness.reason == "dataset_profile_missing_required_files"
-        ):
+        if allow_missing_training_data and missing_data_probe_expected:
             validation_warnings.append(
                 "training data readiness is unavailable "
-                "(dataset_profile_missing_required_files), which the frozen plan permits for "
+                f"({data_readiness.reason}), which the frozen plan permits for "
                 "contract-only verification"
             )
         contract_report_issues.extend(_contract_only_output_issues(staging_root))
@@ -1920,7 +1920,7 @@ def _run_kernel_contract_smoke(
         normal_smoke_result: tuple[int, str, str, bool] | None = None
         normal_smoke_required = contract_passed and bool(plan_pipeline_names)
         if normal_smoke_required:
-            if data_readiness.ready:
+            if training_data_available:
                 _stage_read_only_training_data(paths.data_dir, staged_data_dir)
             env["KAGGLEBOT_DATA_DIR"] = str(staged_data_dir)
             normal_smoke_result = _run_bounded_smoke_command(
@@ -1930,12 +1930,10 @@ def _run_kernel_contract_smoke(
                 timeout_sec=timeout_sec,
             )
         normal_smoke_issues: tuple[str, ...] = ()
-        training_data_unavailable = (
-            not data_readiness.ready and data_readiness.reason == "dataset_profile_missing_required_files"
-        )
-        if normal_smoke_result is not None and (training_data_unavailable or normal_smoke_result[0] != 0):
+        if normal_smoke_result is not None and (missing_data_probe_expected or normal_smoke_result[0] != 0):
             normal_smoke_issues = _missing_data_probe_issues(
                 returncode=normal_smoke_result[0],
+                stdout=normal_smoke_result[1],
                 stderr=normal_smoke_result[2],
                 staging_root=staging_root,
                 training_data_unavailable=training_data_unavailable,
@@ -1961,7 +1959,7 @@ def _run_kernel_contract_smoke(
             contract_report=contract_report,
             contract_report_issues=tuple(contract_report_issues),
             warnings=tuple(validation_warnings),
-            data_ready=data_readiness.ready,
+            data_ready=training_data_available,
             data_readiness_reason=data_readiness.reason,
             allow_missing_training_data=allow_missing_training_data,
             normal_smoke_required=normal_smoke_required,
@@ -2448,18 +2446,27 @@ def _plan_hardware_profile_names(plan_path: Path) -> frozenset[str]:
 
 def _plan_allows_missing_training_data(paths: CompetitionPaths) -> bool:
     plan = load_json_object(paths.plan_path) or {}
-    if (
-        infer_deliverable_mode_from_paths(
-            paths,
-            explicit=plan.get("deliverable_mode"),
-        )
-        == "writeup"
-    ):
+    if _plan_uses_writeup_deliverable(paths, plan=plan):
         return True
 
     raw_runtime_budget = plan.get("runtime_budget")
     runtime_budget = raw_runtime_budget if isinstance(raw_runtime_budget, dict) else {}
     return runtime_budget.get("local_training_required") is True
+
+
+def _plan_uses_writeup_deliverable(
+    paths: CompetitionPaths,
+    *,
+    plan: Mapping[str, object] | None = None,
+) -> bool:
+    resolved_plan = plan if plan is not None else (load_json_object(paths.plan_path) or {})
+    return (
+        infer_deliverable_mode_from_paths(
+            paths,
+            explicit=resolved_plan.get("deliverable_mode"),
+        )
+        == "writeup"
+    )
 
 
 def _plan_model_size_limit_bytes(plan_path: Path) -> float | None:
@@ -2497,6 +2504,7 @@ def _contract_only_output_issues(staging_root: Path) -> tuple[str, ...]:
 def _missing_data_probe_issues(
     *,
     returncode: int,
+    stdout: str = "",
     stderr: str,
     staging_root: Path,
     training_data_unavailable: bool,
@@ -2509,6 +2517,8 @@ def _missing_data_probe_issues(
             issues.append(f"missing-data probe returned {returncode} instead of expected return code 2")
     if not training_data_unavailable:
         issues.append("missing-data probe reported a block while training data readiness is available")
+    if stdout.strip():
+        issues.append("missing-data probe must not emit stdout")
 
     payload = _final_stderr_json_object(stderr)
     if payload is None:
@@ -2518,11 +2528,11 @@ def _missing_data_probe_issues(
             issues.append("missing-data probe JSON must report status='blocked'")
         if payload.get("submission_written") is not False:
             issues.append("missing-data probe JSON must report submission_written=false")
-        if payload.get("error_type") not in {"DataDiscoveryError", "DataContractError"}:
-            issues.append("missing-data probe JSON error_type must be DataDiscoveryError or DataContractError")
+        if payload.get("error_type") != "DataDiscoveryError":
+            issues.append("missing-data probe JSON error_type must be DataDiscoveryError")
         reason_code = payload.get("reason_code")
-        if reason_code is not None and reason_code != "missing_raw_training_assets":
-            issues.append("missing-data probe JSON reason_code must be 'missing_raw_training_assets' when present")
+        if reason_code != "missing_raw_training_assets":
+            issues.append("missing-data probe JSON reason_code must be 'missing_raw_training_assets'")
         if not _message_identifies_missing_training_data(payload.get("message")):
             issues.append("missing-data probe JSON message does not identify unavailable training input")
 

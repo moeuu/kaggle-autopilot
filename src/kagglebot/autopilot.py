@@ -293,6 +293,60 @@ def _is_finite_score(value: object) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
+def _declares_unscored_official_metric(metrics: dict[str, object]) -> bool:
+    """Return whether metrics explicitly decline to claim an official score."""
+    return bool(
+        metrics.get("result_kind") == "unscored_diagnostic_artifact"
+        or metrics.get("score_status") == "official_paired_evaluation_unavailable"
+    )
+
+
+def _is_strict_unscored_diagnostic_payload(metrics: dict[str, object]) -> bool:
+    """Return whether metrics consistently describe a finite diagnostic-only score."""
+    return bool(
+        metrics.get("result_kind") == "unscored_diagnostic_artifact"
+        and metrics.get("score_status") == "official_paired_evaluation_unavailable"
+        and metrics.get("primary_metric_available") is False
+        and metrics.get("submission_ready") is False
+        and metrics.get("final_ready") is False
+        and metrics.get("validation_status") in {"validation_unavailable", "paired_validation_unavailable"}
+        and "metric_value" in metrics
+        and metrics.get("metric_value") is None
+        and "primary_metric_value" in metrics
+        and metrics.get("primary_metric_value") is None
+        and "primary_score" in metrics
+        and metrics.get("primary_score") is None
+        and metrics.get("cv_metric_is_primary_competition_metric") is False
+        and _is_finite_score(metrics.get("cv_metric_value"))
+    )
+
+
+def _resolve_local_score(
+    metrics: dict[str, object],
+    score_source: str,
+) -> tuple[float | None, str | None]:
+    """Resolve the finite local-selection score without promoting nullable official scores."""
+    normalized_source = _normalized_score_source(score_source)
+    if normalized_source == "cv":
+        candidate_keys = ("cv_score", "cv_metric_value", "metric_value", "score")
+    elif normalized_source == "holdout":
+        candidate_keys = (
+            "holdout_score",
+            "primary_metric_value",
+            "primary_score",
+            "metric_value",
+            "score",
+        )
+    else:
+        candidate_keys = ("metric_value", "score")
+
+    for key in candidate_keys:
+        value = metrics.get(key)
+        if _is_finite_score(value):
+            return float(value), key
+    return None, None
+
+
 def _metric_names_compatible(actual: object, expected: object) -> bool:
     if not isinstance(actual, str) or not actual.strip() or not isinstance(expected, str) or not expected.strip():
         return False
@@ -409,6 +463,7 @@ def _resolve_diagnostic_archive_path(
     *,
     kernel_output_dir: Path,
     route_result: dict[str, object],
+    allow_submission_archive: bool = False,
 ) -> Path | None:
     manifest = route_result.get("manifest")
     if not isinstance(manifest, dict):
@@ -429,13 +484,137 @@ def _resolve_diagnostic_archive_path(
             return None
         candidate = Path(raw_path.strip())
         candidate = candidate if candidate.is_absolute() else kernel_output_dir / candidate
-        if not candidate.is_file() or candidate.name.lower() == "submission.zip":
+        if not candidate.is_file() or (candidate.name.lower() == "submission.zip" and not allow_submission_archive):
             return None
         resolved_artifact_paths.append(candidate)
 
     candidates = [kernel_output_dir / archive_name]
     candidates.extend(candidate for candidate in resolved_artifact_paths if candidate.name == archive_name)
     return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _is_validated_unscored_training_artifact(
+    *,
+    kernel_output_dir: Path,
+    metrics: dict[str, object],
+    route_result: dict[str, object],
+    submission_contract: dict[str, object],
+) -> bool:
+    """Return whether a trained artifact is valid but honestly unscored."""
+    unavailable_reason = metrics.get("primary_metric_unavailable_reason")
+    readiness_blockers = metrics.get("readiness_blockers")
+    manifest = route_result.get("manifest")
+    artifact_paths = route_result.get("artifact_paths")
+    archive_name = manifest.get("archive") if isinstance(manifest, dict) else None
+    if (
+        not _is_strict_unscored_diagnostic_payload(metrics)
+        or metrics.get("execution_mode") != "train_and_validate"
+        or metrics.get("training_performed") is not True
+        or metrics.get("execution_status")
+        not in {
+            "success",
+            "unavailable",
+            "validation_unavailable",
+            "paired_validation_unavailable",
+            "validated_unscored_artifact",
+        }
+        or metrics.get("result_kind") != "unscored_diagnostic_artifact"
+        or metrics.get("score_status") != "official_paired_evaluation_unavailable"
+        or metrics.get("offline_artifact_validation_passed") is not True
+        or metrics.get("official_paired_validation_passed") is not False
+        or metrics.get("primary_metric_available") is not False
+        or "primary_score" not in metrics
+        or metrics.get("primary_score") is not None
+        or "primary_metric_value" not in metrics
+        or any(metrics.get(key) is not None for key in ("primary_metric_value", "offline_value", "value"))
+        or metrics.get("cv_metric_is_primary_competition_metric") is not False
+        or metrics.get("submission_ready") is not False
+        or not isinstance(unavailable_reason, str)
+        or not unavailable_reason.strip()
+        or not isinstance(readiness_blockers, list)
+        or not readiness_blockers
+        or any(not isinstance(blocker, str) or not blocker.strip() for blocker in readiness_blockers)
+        or _first_nonempty_string(metrics.get("selected_pipeline")) is None
+        or _first_nonempty_string(metrics.get("selected_candidate_hash")) is None
+        or route_result.get("mode") != "skill_artifact"
+        or route_result.get("validation_status")
+        not in {
+            "success",
+            "unavailable",
+            "validation_unavailable",
+            "paired_validation_unavailable",
+            "validated_unscored_artifact",
+        }
+        or not isinstance(manifest, dict)
+        or not isinstance(archive_name, str)
+        or not archive_name.strip()
+        or Path(archive_name.strip()).name != archive_name.strip()
+        or Path(archive_name.strip()).suffix.lower() != ".zip"
+        or manifest.get("submission_ready") is not False
+        or not isinstance(artifact_paths, list)
+        or not artifact_paths
+    ):
+        return False
+
+    if any(not isinstance(path, str) or not path.strip() for path in artifact_paths):
+        return False
+    if not any(Path(path.strip()).name == archive_name.strip() for path in artifact_paths):
+        return False
+
+    if not bool(
+        submission_contract.get("archive_name") == archive_name.strip()
+        and submission_contract.get("submission_ready") is False
+        and submission_contract.get("canonical_submission_ready") is False
+        and submission_contract.get("offline_artifact_validation_passed") is True
+        and submission_contract.get("official_paired_validation_passed") is False
+    ):
+        return False
+
+    archive_path = _resolve_diagnostic_archive_path(
+        kernel_output_dir=kernel_output_dir,
+        route_result=route_result,
+        allow_submission_archive=True,
+    )
+    if archive_path is None:
+        return False
+    archive_sha256 = _sha256_or_none(archive_path)
+    if not isinstance(archive_sha256, str):
+        return False
+
+    asset_hashes = metrics.get("asset_hashes")
+    metrics_archive_sha256 = asset_hashes.get("archive") if isinstance(asset_hashes, dict) else None
+    final_manifest = _json_utils.load_json_object(kernel_output_dir / "final_artifact_manifest.json") or {}
+    deliverables = final_manifest.get("deliverables")
+    if not isinstance(deliverables, list):
+        return False
+    archive_entries = [
+        entry for entry in deliverables if isinstance(entry, dict) and entry.get("path") == archive_name.strip()
+    ]
+    if len(archive_entries) != 1:
+        return False
+    archive_entry = archive_entries[0]
+
+    submission_validation = _json_utils.load_json_object(kernel_output_dir / "submission_validation.json") or {}
+    claimed_hashes = [
+        metrics.get("archive_hash"),
+        metrics_archive_sha256,
+        manifest.get("archive_sha256"),
+        submission_contract.get("archive_sha256"),
+        archive_entry.get("sha256"),
+        submission_validation.get("archive_sha256"),
+    ]
+
+    return bool(
+        re.fullmatch(r"[0-9a-f]{64}", archive_sha256)
+        and all(claimed_hash == archive_sha256 for claimed_hash in claimed_hashes)
+        and final_manifest.get("submission_ready") is False
+        and archive_entry.get("size") == archive_path.stat().st_size
+        and archive_entry.get("validation_status") == "validated"
+        and archive_entry.get("intended_for_kaggle_submission") is False
+        and submission_validation.get("archive_name") == archive_name.strip()
+        and submission_validation.get("archive_static_valid") is True
+        and submission_validation.get("passed") is False
+    )
 
 
 def _unscored_metrics_match_contract(
@@ -578,6 +757,54 @@ def _load_contract_aware_kernel_metrics(
     target_metric: str,
     authoritative_contract: dict[str, object],
 ) -> EvaluationResult | None:
+    # The caller classifies and preserves the corresponding artifacts before it
+    # reaches this loader. Keep the diagnostic value out of score comparisons.
+    if _is_strict_unscored_diagnostic_payload(metrics):
+        return None
+    if _declares_unscored_official_metric(metrics):
+        raise _kernel_metric_ingestion_error(
+            reason="unscored_diagnostic_contract_rejected",
+            metrics_path=metrics_path,
+            metrics=metrics,
+            candidate_key="metric_value",
+        )
+    score_source = _normalized_score_source(metrics.get("score_source"))
+    local_score, score_key = _resolve_local_score(metrics, score_source)
+    if score_key in {"cv_score", "cv_metric_value", "holdout_score"}:
+        if score_key.startswith("cv_"):
+            metric_name = _first_nonempty_string(
+                metrics.get("cv_metric_name"),
+                metrics.get("cv_metric"),
+                metrics.get("metric_name"),
+                metrics.get("metric"),
+            )
+            metric_direction = _first_nonempty_string(
+                metrics.get("cv_metric_direction"),
+                metrics.get("direction"),
+                metrics.get("metric_direction"),
+            )
+        else:
+            metric_name = _first_nonempty_string(
+                metrics.get("holdout_metric_name"),
+                metrics.get("holdout_metric"),
+                metrics.get("metric_name"),
+                metrics.get("metric"),
+            )
+            metric_direction = _first_nonempty_string(
+                metrics.get("holdout_metric_direction"),
+                metrics.get("direction"),
+                metrics.get("metric_direction"),
+            )
+        metrics["score_key_used"] = score_key
+        scored_payload = dict(metrics)
+        scored_payload["offline_value"] = local_score
+        scored_payload["metric"] = metric_name or target_metric
+        scored_payload["direction"] = metric_direction or direction
+        return _kernel_metrics.evaluation_from_kernel_metrics_payload(
+            scored_payload,
+            direction=direction,
+            target_metric=target_metric,
+        )
     if "metric_value" in metrics:
         raw_metric_value = metrics["metric_value"]
         if isinstance(raw_metric_value, bool) or not isinstance(raw_metric_value, Real):
@@ -620,14 +847,24 @@ def _load_contract_aware_kernel_metrics(
         scored_payload["offline_value"] = float(raw_metric_value)
         scored_payload["metric"] = metric_name or target_metric
         scored_payload["direction"] = metric_direction or direction
+        scored_payload["score_key_used"] = "metric_value"
+        metrics["score_key_used"] = "metric_value"
         return _kernel_metrics.evaluation_from_kernel_metrics_payload(
             scored_payload,
             direction=direction,
             target_metric=target_metric,
         )
-    if "primary_score" not in metrics:
+    if score_key == "score":
+        metrics["score_key_used"] = "score"
         return _kernel_metrics.load_kernel_metrics(metrics_path, direction, target_metric)
-    raw_primary_score = metrics.get("primary_score")
+    if score_key in {"primary_metric_value", "primary_score"}:
+        raw_primary_score = local_score
+        primary_score_key = score_key
+    elif "primary_score" not in metrics:
+        return _kernel_metrics.load_kernel_metrics(metrics_path, direction, target_metric)
+    else:
+        raw_primary_score = metrics.get("primary_score")
+        primary_score_key = "primary_score"
     if not _is_finite_score(raw_primary_score):
         return None
     primary_score = float(raw_primary_score)
@@ -642,11 +879,34 @@ def _load_contract_aware_kernel_metrics(
     scored_payload = dict(metrics)
     scored_payload["offline_value"] = primary_score
     scored_payload["direction"] = direction
+    scored_payload["score_key_used"] = primary_score_key
+    metrics["score_key_used"] = primary_score_key
     return _kernel_metrics.evaluation_from_kernel_metrics_payload(
         scored_payload,
         direction=direction,
         target_metric=target_metric,
     )
+
+
+def _add_kernel_score_provenance(
+    payload: dict[str, object],
+    kernel_metrics: dict[str, object] | None,
+) -> None:
+    if not isinstance(kernel_metrics, dict):
+        return
+    for key in (
+        "score_key_used",
+        "cv_score",
+        "cv_metric_name",
+        "cv_metric_is_primary_competition_metric",
+        "primary_score",
+        "primary_metric_value",
+        "primary_metric_available",
+        "official_paired_validation_passed",
+        "submission_ready",
+    ):
+        if key in kernel_metrics:
+            payload[key] = kernel_metrics[key]
 
 
 def _resolve_validation_blocked_kernel_result(
@@ -682,19 +942,27 @@ def _resolve_unscored_diagnostic_kernel_result(
     authoritative_evaluation_contract: dict[str, object],
     deliverable_mode: str,
     submit_mode: str,
+    code_competition: bool = False,
 ) -> _UnscoredDiagnosticKernelResult | None:
-    if deliverable_mode != "writeup" or submit_mode != "file":
+    if deliverable_mode != "writeup" or submit_mode != "file" or code_competition:
         return None
     route_result = _json_utils.load_json_object(kernel_result.output_dir / "route_result.json") or {}
     submission_contract = _json_utils.load_json_object(kernel_result.output_dir / "submission_contract.json") or {}
     canonical_submission_emitted = any(path.is_file() for path in kernel_result.output_dir.rglob("submission.zip"))
-    if not is_unscored_non_training_diagnostic(
+    unscored_non_training_diagnostic = is_unscored_non_training_diagnostic(
         metrics=kernel_metrics,
         route_result=route_result,
         submission_contract=submission_contract,
         decision=training_route_decision,
         canonical_submission_emitted=canonical_submission_emitted,
-    ):
+    )
+    validated_unscored_training_artifact = _is_validated_unscored_training_artifact(
+        kernel_output_dir=kernel_result.output_dir,
+        metrics=kernel_metrics,
+        route_result=route_result,
+        submission_contract=submission_contract,
+    )
+    if not unscored_non_training_diagnostic and not validated_unscored_training_artifact:
         return None
     if _kernel_output_reports_failure(kernel_result.output_dir):
         return None
@@ -708,6 +976,7 @@ def _resolve_unscored_diagnostic_kernel_result(
     diagnostic_archive_path = _resolve_diagnostic_archive_path(
         kernel_output_dir=kernel_result.output_dir,
         route_result=route_result,
+        allow_submission_archive=validated_unscored_training_artifact,
     )
     if diagnostic_archive_path is None:
         return None
@@ -726,9 +995,14 @@ def _preserve_diagnostic_artifacts(
 ) -> list[str]:
     artifact_names = {
         "candidate_ledger.jsonl",
+        "final_artifact_manifest.json",
         "metrics.json",
         "route_result.json",
         "submission_contract.json",
+        "submission_validation.json",
+        "writeup.md",
+        "writeup_evidence.json",
+        "writeup_word_count.json",
     }
     manifest = route_result.get("manifest")
     if isinstance(manifest, dict):
@@ -1112,6 +1386,11 @@ def _recover_pending_oracle_workflow(*, config: AutopilotConfig, run_id: str) ->
             run_id=run_id,
             workflow_id=workflow_id,
             payload=payload,
+        ) or _complete_obsolete_kernel_metrics_fix_recovery(
+            config=config,
+            run_id=run_id,
+            workflow_id=workflow_id,
+            payload=payload,
         ):
             return
         iteration = _workflow_required_int(payload, "iteration", workflow_id=workflow_id)
@@ -1249,6 +1528,42 @@ def _complete_obsolete_kernel_source_fix_recovery(
     print(
         "[yellow]resume[/yellow]: interrupted kernel source fix is obsolete; "
         "the current deliverable contract already passes, so kernel execution can resume"
+    )
+    return True
+
+
+def _complete_obsolete_kernel_metrics_fix_recovery(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    workflow_id: str,
+    payload: dict[str, object],
+) -> bool:
+    """Skip a nullable-metric repair after the loader learned its strict contract."""
+    if str(payload.get("failure_stage") or "").strip().lower() != "kernel_runtime":
+        return False
+    error_message = str(payload.get("error_message") or "")
+    if "reason=metric_value_not_numeric" not in error_message:
+        return False
+    match = re.search(r"(?:^|;\s*)metrics_path=([^;]+)", error_message)
+    if match is None:
+        return False
+    metrics_path = Path(match.group(1).strip()).resolve()
+    run_dir = config.paths.run_dir(run_id).resolve()
+    if not metrics_path.is_relative_to(run_dir) or not metrics_path.is_file():
+        return False
+    metrics = _json_utils.load_json_object_or_empty(metrics_path)
+    if not _is_strict_unscored_diagnostic_payload(metrics):
+        return False
+
+    checkpoint = _oracle_workflow_state.OracleWorkflowCheckpoint(
+        path=_oracle_workflow_state.oracle_workflow_state_path(run_dir),
+        workflow_id=workflow_id,
+    )
+    checkpoint.mark_completed()
+    print(
+        "[yellow]resume[/yellow]: interrupted nullable-metric repair is obsolete; "
+        "the current loader accepts this strict diagnostic-only contract"
     )
     return True
 
@@ -1440,6 +1755,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     research_scout_mode = loop_settings.research_scout_mode
     top1_submit_policy = loop_settings.top1_submit_policy
     submit_mode = loop_settings.submit_mode
+    code_competition = bool(resolved.get("code_competition"))
     writeup_mode = loop_settings.writeup_mode
     submit_enabled = loop_settings.submit_enabled
     writeup_submit_enabled = loop_settings.writeup_submit_enabled
@@ -1506,8 +1822,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         compute=config.compute,
         deliverable_mode=deliverable_mode,
         submit_mode=submit_mode,
-        code_competition=bool(resolved.get("code_competition")),
-        require_training=True,
+        code_competition=code_competition,
     )
     direct_notebook_execution = bool(training_route_decision.direct_notebook and submit_enabled)
     training_route_payload = training_route_decision.to_dict()
@@ -1754,6 +2069,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     loop_started_at = time.monotonic()
     last_completed_iteration = start_iteration - 1
     non_submittable_diagnostic_reason: str | None = None
+    external_writeup_submission_allowed = False
 
     try:
         for iteration in range(start_iteration, max_iterations + 1):
@@ -1954,6 +2270,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                     authoritative_evaluation_contract=evaluation_contract,
                                     deliverable_mode=deliverable_mode,
                                     submit_mode=submit_mode,
+                                    code_competition=code_competition,
                                 )
                                 if unscored_diagnostic_result is not None:
                                     unscored_diagnostic_kernel_output_dir = kernel_result.output_dir
@@ -2165,6 +2482,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                     authoritative_evaluation_contract=evaluation_contract,
                                     deliverable_mode=deliverable_mode,
                                     submit_mode=submit_mode,
+                                    code_competition=code_competition,
                                 )
                                 if unscored_diagnostic_result is not None:
                                     unscored_diagnostic_kernel_output_dir = kernel_result.output_dir
@@ -2290,6 +2608,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                             authoritative_evaluation_contract=evaluation_contract,
                                             deliverable_mode=deliverable_mode,
                                             submit_mode=submit_mode,
+                                            code_competition=code_competition,
                                         )
                                         if unscored_diagnostic_result is not None:
                                             unscored_diagnostic_kernel_output_dir = kernel_result.output_dir
@@ -2360,6 +2679,9 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 )
                 non_submittable_diagnostic_reason = diagnostic_reason
                 diagnostic_metrics_payload = dict(kernel_metrics_payload or {})
+                diagnostic_score_status = (
+                    _first_nonempty_string(diagnostic_metrics_payload.get("score_status")) or "unavailable"
+                )
                 asset_hashes = diagnostic_metrics_payload.get("asset_hashes")
                 archive_hash = asset_hashes.get("archive") if isinstance(asset_hashes, dict) else None
                 candidate_hash = _first_nonempty_string(
@@ -2374,7 +2696,12 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                         "iteration_status": diagnostic_status,
                         "metric_available": False,
                         "score_available": False,
-                        "score_status": "unavailable",
+                        "score_status": diagnostic_score_status,
+                        "offline_value": None,
+                        "value": None,
+                        "improved": False,
+                        "submission_ready": False,
+                        "submission_attempted": False,
                         "submission_eligible": False,
                         "scored_candidate": False,
                         "diagnostic_only": True,
@@ -2387,6 +2714,27 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 )
                 if validation_blocked_result is not None:
                     diagnostic_metrics_payload["validation_blockers"] = list(validation_blocked_result.blockers)
+                if writeup_mode and unscored_diagnostic_result is not None:
+                    source_report_path = diagnostic_output_dir / "writeup.md"
+                    writeup_bundle_meta = build_writeup_bundle(
+                        paths=config.paths,
+                        run_id=run_id,
+                        iteration=iteration,
+                        resolved=resolved,
+                        evaluation=None,
+                        metrics_payload=diagnostic_metrics_payload,
+                        top1_info=top1_info if isinstance(top1_info, dict) else None,
+                        notebook_id=iteration_kernel_id,
+                        source_report_path=source_report_path,
+                    )
+                    diagnostic_metrics_payload["deliverable_mode"] = "writeup"
+                    diagnostic_metrics_payload["writeup_bundle"] = writeup_bundle_meta
+                    run_payload["writeup_bundle"] = writeup_bundle_meta
+                    external_writeup_submission_allowed = bool(
+                        config.force_submit
+                        and writeup_bundle_meta.get("status") == "ready_for_submit"
+                        and writeup_bundle_meta.get("external_evaluation_required") is True
+                    )
                 _iteration_metrics.write_iteration_metrics_payload(metrics_path, diagnostic_metrics_payload)
                 _autopilot_state.write_iteration_state_marker(
                     iter_dir=iter_dir,
@@ -2401,7 +2749,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     submit_phase_state=diagnostic_status,
                     submitted=False,
                     readiness_score=None,
-                    trained=False,
+                    trained=diagnostic_metrics_payload.get("training_performed") is True,
                     iteration_status=diagnostic_status,
                 )
                 _autopilot_state.apply_run_status(
@@ -2425,8 +2773,32 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             metric_mismatch_reason: str | None = None
             metric_fix_attempts = 0
             metric_recheck_attempted = False
+            local_score_key = (
+                kernel_metrics_payload.get("score_key_used") if isinstance(kernel_metrics_payload, dict) else None
+            )
+            non_primary_local_selection_score = bool(
+                local_score_key in {"cv_score", "cv_metric_value"}
+                and isinstance(kernel_metrics_payload, dict)
+                and kernel_metrics_payload.get("cv_metric_is_primary_competition_metric") is False
+            )
+            if (
+                non_primary_local_selection_score
+                and evaluation.metric
+                and target_metric
+                and not _metric_matching.metrics_equivalent(evaluation.metric, target_metric)
+            ):
+                metric_mismatch_detected = True
+                metric_mismatch_reason = (
+                    f"local_selection={evaluation.metric}, official_target={target_metric}, score_key={local_score_key}"
+                )
+                print(
+                    "[yellow]local selection score[/yellow]: "
+                    f"using {local_score_key}={evaluation.value:.6f} for iteration ranking; "
+                    "official competition validation remains unavailable."
+                )
             while (
-                evaluation.metric
+                not non_primary_local_selection_score
+                and evaluation.metric
                 and target_metric
                 and (not _metric_matching.metrics_equivalent(evaluation.metric, target_metric))
             ):
@@ -3313,6 +3685,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 else None,
                 accuracy_potential=accuracy_potential,
             )
+            _add_kernel_score_provenance(pre_submit_metrics_payload, kernel_metrics_payload)
             pre_submit_metrics_payload["checkpoint_phase"] = "pre_submit"
             pre_submit_metrics_payload["quality_guard"] = quality_guard
             pre_submit_metrics_payload["forced_submit_reason"] = forced_submit_reason or ""
@@ -3574,6 +3947,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 else None,
                 accuracy_potential=accuracy_potential,
             )
+            _add_kernel_score_provenance(metrics_payload, kernel_metrics_payload)
             campaign_metrics_payload = None
             if campaign_mode == "top1":
                 campaign_metrics_payload = {
@@ -4122,7 +4496,11 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             "(all candidates were blocked by quality guard)."
         )
 
-    if non_submittable_diagnostic_reason is None and writeup_submit_enabled and writeup_bundle_meta is not None:
+    if (
+        (non_submittable_diagnostic_reason is None or external_writeup_submission_allowed)
+        and writeup_submit_enabled
+        and writeup_bundle_meta is not None
+    ):
         notebook_payload = writeup_bundle_meta.get("notebook")
         notebook_publish_required = (
             isinstance(notebook_payload, dict)
@@ -4230,7 +4608,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         and not config.dry_run
         and not submit_obligation_satisfied
     )
-    if non_submittable_diagnostic_reason is None:
+    if non_submittable_diagnostic_reason is None or external_writeup_submission_allowed:
         _autopilot_state.apply_final_run_status(
             run_payload,
             submitted=submitted,
@@ -4947,9 +5325,17 @@ def _run_kernel_fix_body(
                 guard_snapshot=guard_snapshot,
                 auto_repair=True,
             )
+            if not config.dry_run and any(path.startswith("src/") for path in changed):
+                # The edit itself is durable.  Mark this Oracle-to-Codex step
+                # complete before exec so the new process resumes the failed
+                # iteration instead of asking another agent to repeat the same
+                # source repair.
+                if workflow_checkpoint is not None:
+                    workflow_checkpoint.mark_completed()
             _autofix_restart.maybe_restart_for_src_changes(
                 dry_run=config.dry_run,
                 run_dir=config.paths.run_dir(run_id),
+                repo_root=config.paths.repo_root,
                 run_id=run_id,
                 slug=config.slug,
                 changed=changed,
@@ -5298,9 +5684,13 @@ def _run_autofix_body(
         changed = _diff_snapshots(before, after)
         # Autofix often needs to regenerate staged outputs under artifacts/*/kernels and
         # run-level state files; do not apply write-guard restrictions in this stage.
+        if not config.dry_run and any(path.startswith("src/") for path in changed):
+            if workflow_checkpoint is not None:
+                workflow_checkpoint.mark_completed()
         _autofix_restart.maybe_restart_for_src_changes(
             dry_run=config.dry_run,
             run_dir=config.paths.run_dir(run_id),
+            repo_root=config.paths.repo_root,
             run_id=run_id,
             slug=config.slug,
             changed=changed,

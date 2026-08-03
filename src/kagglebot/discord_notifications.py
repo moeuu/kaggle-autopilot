@@ -29,6 +29,8 @@ STATE_FILENAME = "discord_notifier_state.json"
 DELIVERY_RECEIPTS_FILENAME = "discord_delivery_receipts.jsonl"
 LEDGER_OFFSET_KEY = "watch_ledger_offset"
 LEDGER_CURSOR_INITIALIZED_KEY = "watch_ledger_cursor_initialized"
+DELIVERED_LIFECYCLE_KEYS = "delivered_lifecycle_keys"
+_MAX_DELIVERED_LIFECYCLE_KEYS = 256
 _LIFECYCLE_EVENT_TYPES = {
     "started": "autopilot.started",
     "finished": "autopilot.finished",
@@ -336,8 +338,14 @@ def _replay_watch_lifecycle_events(
             dedupe_key = _lifecycle_dedupe_key(
                 payload=payload,
                 event_type=event_type,
-                ledger_offset=offset,
             )
+            if dedupe_key in _delivered_lifecycle_keys(state):
+                offset = next_offset
+                state[LEDGER_OFFSET_KEY] = offset
+                write_json_object(state_path, state, sort_keys=True)
+                print(f"[cyan]discord notifier[/cyan]: skipped duplicate lifecycle {dedupe_key}")
+                saved_offset = offset
+                continue
             receipt = notifier.emit(
                 event_type=event_type,
                 severity="error" if event_name == "failed" else "info",
@@ -359,6 +367,7 @@ def _replay_watch_lifecycle_events(
                 return sent_any, True
             sent_any = True
             offset = next_offset
+            _remember_delivered_lifecycle_key(state, dedupe_key)
             state["last_event_type"] = event_type
             state["last_run_id"] = _clean_str(payload.get("run_id"))
             state["last_sent_at"] = current_time.isoformat()
@@ -764,12 +773,26 @@ def _lifecycle_dedupe_key(
     *,
     payload: dict[str, object],
     event_type: str,
-    ledger_offset: int,
 ) -> str:
     state_scope = str(payload.get("state_scope") or "local_gpu")
     slug = str(payload.get("competition") or "unknown")
     run_id = str(payload.get("run_id") or "none")
-    return f"kaggle-autopilot:{state_scope}:{event_type}:{slug}:{run_id}:ledger:{ledger_offset}"
+    return f"kaggle-autopilot:{state_scope}:{event_type}:{slug}:{run_id}"
+
+
+def _delivered_lifecycle_keys(state: dict[str, object]) -> set[str]:
+    raw = state.get(DELIVERED_LIFECYCLE_KEYS)
+    if not isinstance(raw, list):
+        return set()
+    return {str(value) for value in raw if str(value).strip()}
+
+
+def _remember_delivered_lifecycle_key(state: dict[str, object], dedupe_key: str) -> None:
+    raw = state.get(DELIVERED_LIFECYCLE_KEYS)
+    keys = [str(value) for value in raw] if isinstance(raw, list) else []
+    keys = [value for value in keys if value != dedupe_key]
+    keys.append(dedupe_key)
+    state[DELIVERED_LIFECYCLE_KEYS] = keys[-_MAX_DELIVERED_LIFECYCLE_KEYS:]
 
 
 def _snapshot_key(snapshot: dict[str, object]) -> str:

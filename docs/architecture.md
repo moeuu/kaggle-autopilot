@@ -149,6 +149,15 @@ For each iteration:
    - if max iteration reached: stop loop
    - else: run improvement and continue
 
+For a `writeup`/file `skill_artifact` route, a kernel may finish with a statically validated archive while the official
+paired evaluator is unavailable. Autopilot records that explicit state as `validated_unscored_artifact` and stops
+retrying the unchanged kernel, but keeps the score null and excludes the artifact from improvement, readiness, rank,
+and score-based submission decisions. With explicit `--force`, a writeup contract that delegates evaluation to the
+organizer may instead seal the validated report and required archive hashes, select the declared track, attach the
+exact files and a hash-bound 560×280 card image, and submit once through Kaggle's authenticated UI. The adapter requires
+Kaggle's 5/5 checklist before clicking Submit and reconciles the exact project card as `DRAFT (IN PROGRESS)` or
+`SUBMITTED`; missing post-submit confirmation, filenames, track, or card evidence remains ambiguous.
+
 Loop decision source:
 - primary: readiness score (SRS) from offline evaluation + uncertainty
 - secondary: submission score/rank guardrails when submission outcomes are available
@@ -470,7 +479,11 @@ Recommended extraction order:
    context formatting, submit-file repair contract prompts/retry feedback, artifact resolution, deterministic file
    repair preparation, same-fingerprint retry allowance, and submit retry decisions are now extracted.
    Autofix restart and one-shot kernel regeneration retry/marker/note persistence are now in `autofix_restart.py`; loop
-   code calls that public module directly rather than preserving a private restart wrapper.
+   code calls that public module directly rather than preserving a private restart wrapper. Repair snapshots always
+   include the loaded `src/` tree even when competition artifacts live outside the repository. Every distinct source
+   generation written by a repair triggers an exec-based reload of the same run; a repeated reload request for the
+   identical generation fails closed instead of continuing with stale imports. Codex processes that share a repository
+   are serialized by a process lock so local, sidecar, and self-improvement agents cannot edit it concurrently.
    Lightweight runtime-fix action selection, artifact writers for missing columns, column aliases, object dtype
    coercion, device coercion, blocked modules, autofix note persistence, deterministic strategy-skip decisions, and
    kernel-first non-autofixable runtime checks are now in `runtime_fixes.py`.

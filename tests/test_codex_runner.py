@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import threading
 from pathlib import Path
 
 from kagglebot.agents import codex_runner
@@ -21,6 +22,31 @@ def test_format_command_for_log_keeps_short_command_on_one_line() -> None:
 
     assert first == "uv run pytest -q"
     assert second == ""
+
+
+def test_repository_agent_lock_path_is_stable_per_worktree(tmp_path: Path) -> None:
+    first = codex_runner._repository_agent_lock_path(tmp_path)  # noqa: SLF001
+    second = codex_runner._repository_agent_lock_path(tmp_path / ".")  # noqa: SLF001
+    other = codex_runner._repository_agent_lock_path(tmp_path / "other")  # noqa: SLF001
+
+    assert first == second
+    assert first != other
+
+
+def test_repository_agent_lock_serializes_same_worktree(tmp_path: Path) -> None:
+    acquired = threading.Event()
+
+    def acquire_second() -> None:
+        with codex_runner._repository_agent_lock(tmp_path):  # noqa: SLF001
+            acquired.set()
+
+    with codex_runner._repository_agent_lock(tmp_path):  # noqa: SLF001
+        thread = threading.Thread(target=acquire_second)
+        thread.start()
+        assert not acquired.wait(0.1)
+    assert acquired.wait(2.0)
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
 
 
 def test_codex_timeout_uses_environment_override(monkeypatch) -> None:

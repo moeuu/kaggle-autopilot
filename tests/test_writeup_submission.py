@@ -21,6 +21,9 @@ class _Adapter:
         self.existing_status = existing_status
         self.calls = 0
         self.find_calls = 0
+        self.artifact_paths: list[Path] = []
+        self.track_label: str | None = None
+        self.card_image_path: Path | None = None
 
     def find_submitted(self, *, slug: str, title: str) -> dict[str, object]:
         self.find_calls += 1
@@ -32,11 +35,23 @@ class _Adapter:
             "url": "https://www.kaggle.com/competitions/demo/writeups/demo-solution",
         }
 
-    def submit(self, *, slug: str, title: str, body: str) -> dict[str, object]:
+    def submit(
+        self,
+        *,
+        slug: str,
+        title: str,
+        body: str,
+        artifact_paths: list[Path],
+        track_label: str | None,
+        card_image_path: Path | None,
+    ) -> dict[str, object]:
         self.calls += 1
         assert slug == "demo"
         assert title == "Demo solution"
         assert "evidence" in body
+        self.artifact_paths = artifact_paths
+        self.track_label = track_label
+        self.card_image_path = card_image_path
         return {"status": self.status, "reason": "test"}
 
 
@@ -132,6 +147,30 @@ def test_writeup_submission_does_not_retry_ambiguous_attempt(tmp_path: Path) -> 
     assert adapter.calls == 1
 
 
+def test_writeup_submission_retries_explicit_pre_submit_failure(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    adapter = _Adapter(status="failed")
+
+    first = submit_validated_writeup(
+        request,
+        adapter=adapter,
+        entered_loader=lambda **kwargs: [_competition()],
+        rules_checker=lambda slug, **kwargs: True,
+    )
+    adapter.status = "submitted"
+    second = submit_validated_writeup(
+        request,
+        adapter=adapter,
+        entered_loader=lambda **kwargs: [_competition()],
+        rules_checker=lambda slug, **kwargs: True,
+    )
+
+    assert first["status"] == "failed"
+    assert second["status"] == "submitted"
+    assert adapter.calls == 2
+    assert adapter.find_calls == 2
+
+
 def test_writeup_submission_reconciles_existing_kaggle_submission(tmp_path: Path) -> None:
     request = _request(tmp_path)
     adapter = _Adapter(existing_status="submitted")
@@ -195,6 +234,65 @@ def test_writeup_submission_blocks_changed_required_artifact(tmp_path: Path) -> 
 
     assert result["status"] == "blocked_required_artifact"
     assert "changed" in str(result["reason"])
+    assert adapter.calls == 0
+
+
+def test_writeup_submission_passes_validated_attachment_and_track_to_adapter(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    artifact = tmp_path / "submission.zip"
+    artifact.write_bytes(b"validated archive")
+    request.metadata.update(
+        {
+            "track": "static_skills",
+            "artifact_contract": {
+                "required_output_names": ["submission.zip"],
+                "requires_notebook": False,
+            },
+            "required_artifacts": [
+                {
+                    "name": "submission.zip",
+                    "path": str(artifact),
+                    "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                }
+            ],
+        }
+    )
+    adapter = _Adapter()
+
+    result = submit_validated_writeup(
+        request,
+        adapter=adapter,
+        entered_loader=lambda **kwargs: [_competition()],
+        rules_checker=lambda slug, **kwargs: True,
+    )
+
+    assert result["status"] == "submitted"
+    assert adapter.artifact_paths == [artifact]
+    assert adapter.track_label == "Static Skills"
+
+
+def test_writeup_submission_identity_includes_track(tmp_path: Path) -> None:
+    first = _request(tmp_path)
+    first.metadata["track"] = "static_skills"
+    static_result = submit_validated_writeup(replace(first, dry_run=True), adapter=_Adapter())
+    first.metadata["track"] = "meta_skills"
+    meta_result = submit_validated_writeup(replace(first, dry_run=True), adapter=_Adapter())
+
+    assert static_result["submission_sha256"] != meta_result["submission_sha256"]
+
+
+def test_writeup_submission_blocks_missing_required_attachment_record(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    request.metadata["artifact_contract"] = {
+        "required_output_names": ["submission.zip"],
+        "requires_notebook": False,
+    }
+    adapter = _Adapter()
+
+    result = submit_validated_writeup(request, adapter=adapter)
+
+    assert result["status"] == "blocked_required_artifact"
+    assert "evidence is missing" in str(result["reason"])
     assert adapter.calls == 0
 
 

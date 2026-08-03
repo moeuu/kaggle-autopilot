@@ -3,6 +3,8 @@
 Recommended action: Prioritize submission-mode and artifact validation fixes before model search.
 
 ## Signals
+- cuhk-x-competition-small-model-track 20260803T170033Z-e983c0ce: gap=None
+- skill-lift 20260802T170131Z-2589eb40: gap=None
 - skill-lift 20260731T154422Z-6ae67326: gap=None
 - scripture-in-new-frontiers 20260731T151357Z-4111544b: gap=None
 - titanic 20260731T130322Z-d4abf336: gap=None
@@ -11,8 +13,6 @@ Recommended action: Prioritize submission-mode and artifact validation fixes bef
 - scripture-in-new-frontiers 20260729T081158Z-399ad2dd: gap=None
 - autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: gap=None
 - playground-series-s6e7 20260727T121034Z-a02d37d5: gap=None
-- scripture-in-new-frontiers 20260726T210223Z-39e66e81: gap=None
-- cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: gap=None
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

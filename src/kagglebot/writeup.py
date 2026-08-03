@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,6 +18,7 @@ from kagglebot.submission_sample_discovery import (
     tabular_suffix,
 )
 from kagglebot.validators import scan_text_for_secrets
+from kagglebot.writeup_card import ensure_writeup_card
 
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths
@@ -380,10 +382,11 @@ def build_writeup_bundle(
     run_id: str,
     iteration: int,
     resolved: dict[str, object],
-    evaluation: EvaluationResult,
+    evaluation: EvaluationResult | None,
     metrics_payload: dict[str, object],
     top1_info: dict[str, object] | None,
     notebook_id: str | None = None,
+    source_report_path: Path | None = None,
 ) -> dict[str, object]:
     run_dir = paths.run_dir(run_id)
     writeup_dir = run_dir / "writeup"
@@ -405,9 +408,23 @@ def build_writeup_bundle(
     checklist_path = writeup_dir / "submission_checklist.md"
     evidence_path = appendix_dir / "proxy_metrics.json"
     metadata_path = writeup_dir / "writeup_metadata.json"
+    card_image_path = ensure_writeup_card(writeup_dir / "card_thumbnail.png")
 
-    pipeline = str(metrics_payload.get("chosen_pipeline") or "the recorded competition pipeline")
-    metric_text = f"{evaluation.metric}={evaluation.value:.6f} ({evaluation.direction})"
+    pipeline = str(
+        metrics_payload.get("chosen_pipeline")
+        or metrics_payload.get("selected_pipeline")
+        or "the recorded competition pipeline"
+    )
+    proxy_metric, proxy_value, proxy_direction = _writeup_proxy_evidence(
+        evaluation=evaluation,
+        metrics_payload=metrics_payload,
+        resolved=resolved,
+    )
+    metric_text = (
+        f"{proxy_metric}={proxy_value:.6f} ({proxy_direction})"
+        if proxy_value is not None
+        else f"{proxy_metric}=unavailable ({proxy_direction})"
+    )
     report_lines = [
         f"# {paths.slug}: evidence-backed competition solution",
         "",
@@ -415,7 +432,7 @@ def build_writeup_bundle(
         "",
         (
             f"This submission presents {pipeline}. The implementation was evaluated with the recorded "
-            f"offline protocol and achieved {metric_text}. Because this competition is judged through a "
+            f"offline protocol and recorded {metric_text}. Because this competition is judged through a "
             "writeup, that value is reported as reproducible proxy evidence rather than an official score."
         ),
         "",
@@ -424,7 +441,11 @@ def build_writeup_bundle(
         f"- Run ID: `{run_id}`",
         f"- Iteration: `{iteration}`",
         "- Official deliverable mode: `writeup`",
-        f"- Proxy metric: `{evaluation.metric}` = `{evaluation.value:.6f}` ({evaluation.direction})",
+        (
+            f"- Proxy metric: `{proxy_metric}` = `{proxy_value:.6f}` ({proxy_direction})"
+            if proxy_value is not None
+            else f"- Proxy metric: `{proxy_metric}` is unavailable ({proxy_direction})"
+        ),
         (
             f"- Selected pipeline: `{metrics_payload.get('chosen_pipeline')}`"
             if metrics_payload.get("chosen_pipeline")
@@ -487,7 +508,16 @@ def build_writeup_bundle(
             "",
         ]
     )
-    report_text = "\n".join(report_lines).strip() + "\n"
+    resolved_source_report = (
+        source_report_path if source_report_path is not None and source_report_path.is_file() else None
+    )
+    report_text = (
+        resolved_source_report.read_text(encoding="utf-8")
+        if resolved_source_report is not None
+        else "\n".join(report_lines).strip() + "\n"
+    )
+    if not report_text.endswith("\n"):
+        report_text += "\n"
     report_path.write_text(report_text, encoding="utf-8")
 
     checklist_lines = [
@@ -503,9 +533,9 @@ def build_writeup_bundle(
 
     evidence_payload = {
         "deliverable_mode": "writeup",
-        "proxy_metric": evaluation.metric,
-        "proxy_value": evaluation.value,
-        "proxy_direction": evaluation.direction,
+        "proxy_metric": proxy_metric,
+        "proxy_value": proxy_value,
+        "proxy_direction": proxy_direction,
         "run_id": run_id,
         "iteration": iteration,
         "chosen_pipeline": metrics_payload.get("chosen_pipeline"),
@@ -522,11 +552,11 @@ def build_writeup_bundle(
     requirement_constraints = extract_writeup_constraints(paths)
     validation = validate_writeup_report(
         report_path,
-        required_sections=section_titles,
+        required_sections=[] if resolved_source_report is not None else section_titles,
         min_words=requirement_constraints.get("min_words"),
         max_words=requirement_constraints.get("max_words"),
     )
-    artifact_errors = [f"required notebook output not found: {name}" for name in missing_required_artifacts]
+    artifact_errors = [f"required submission artifact not found: {name}" for name in missing_required_artifacts]
     if artifact_errors:
         validation["errors"] = [*list(validation.get("errors") or []), *artifact_errors]
         validation["valid"] = False
@@ -550,8 +580,21 @@ def build_writeup_bundle(
             "required_output_names": list(deliverable_contract.required_output_names),
             "requires_notebook": deliverable_contract.requires_notebook,
             "submit_mode": deliverable_contract.submit_mode,
+            "requires_resource_attachment": bool(
+                deliverable_contract.required_output_names and not deliverable_contract.requires_notebook
+            ),
         },
         "required_artifacts": required_artifacts,
+        "card_image_required": True,
+        "card_image": {
+            "path": str(card_image_path),
+            "sha256": sha256_path(card_image_path),
+            "width": 560,
+            "height": 280,
+        },
+        "track": resolved.get("track"),
+        "external_evaluation_required": evaluation is None,
+        "source_report_path": str(resolved_source_report) if resolved_source_report is not None else None,
         "notebook": {
             "required": deliverable_contract.requires_notebook,
             "status": "ready" if notebook_ready else "publish_required",
@@ -564,6 +607,32 @@ def build_writeup_bundle(
     }
     write_json_object(metadata_path, metadata)
     return metadata
+
+
+def _writeup_proxy_evidence(
+    *,
+    evaluation: EvaluationResult | None,
+    metrics_payload: dict[str, object],
+    resolved: dict[str, object],
+) -> tuple[str, float | None, str]:
+    if evaluation is not None:
+        return evaluation.metric, evaluation.value, evaluation.direction
+    metric = str(metrics_payload.get("cv_metric_name") or metrics_payload.get("metric_name") or "offline proxy")
+    raw_value = metrics_payload.get("cv_metric_value")
+    if raw_value is None:
+        raw_value = metrics_payload.get("cv_score")
+    value = (
+        float(raw_value)
+        if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool) and math.isfinite(float(raw_value))
+        else None
+    )
+    direction = str(
+        metrics_payload.get("cv_metric_direction")
+        or metrics_payload.get("direction")
+        or resolved.get("target_direction")
+        or "maximize"
+    )
+    return metric, value, direction
 
 
 def attach_published_writeup_notebook(

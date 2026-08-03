@@ -1189,12 +1189,16 @@ def test_run_watch_once_resumes_active_kaggle_gpu_run_when_quota_low(monkeypatch
         captured["run_id"] = config.run_id
 
     monkeypatch.setattr("kagglebot.supervisor.run_autopilot", fake_run_autopilot)
+    monkeypatch.setattr("kagglebot.supervisor._watch_training_completion_issue", lambda **kwargs: None)
 
     result = run_watch_once(config)
 
     assert result.status == "finished"
     assert result.slug == "demo"
     assert captured == {"slug": "demo", "run_id": None}
+    records = WatchLedger(config.ledger_path).records()
+    assert any(record.get("event") == "resumed" for record in records)
+    assert not any(record.get("event") == "started" for record in records)
 
 
 def test_run_watch_once_dry_run_does_not_call_autopilot(monkeypatch, tmp_path: Path) -> None:
@@ -1288,12 +1292,16 @@ def test_run_watch_once_resumes_active_run(monkeypatch, tmp_path: Path) -> None:
         captured["run_id"] = config.run_id
 
     monkeypatch.setattr("kagglebot.supervisor.run_autopilot", fake_run_autopilot)
+    monkeypatch.setattr("kagglebot.supervisor._watch_training_completion_issue", lambda **kwargs: None)
 
     result = run_watch_once(config)
 
     assert result.status == "finished"
     assert result.slug == "demo"
     assert captured["run_id"] is None
+    records = WatchLedger(config.ledger_path).records()
+    assert any(record.get("event") == "resumed" for record in records)
+    assert not any(record.get("event") == "started" for record in records)
 
 
 def test_run_watch_once_restarts_interrupted_preflight_with_same_run_id(monkeypatch, tmp_path: Path) -> None:
@@ -1492,6 +1500,7 @@ def test_run_watch_once_resumes_data_block_after_training_archive_is_staged(monk
         "kagglebot.supervisor.run_autopilot",
         lambda autopilot_config: captured.update(run_id=autopilot_config.run_id),
     )
+    monkeypatch.setattr("kagglebot.supervisor._watch_training_completion_issue", lambda **kwargs: None)
 
     result = run_watch_once(config)
 

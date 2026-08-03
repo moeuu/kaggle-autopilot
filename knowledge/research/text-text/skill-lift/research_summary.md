@@ -1,23 +1,41 @@
-# Ranked shortlist
+# Ranked candidate pipeline shortlist
 
-## 1. Contrastive-assessed sparse progressive portfolio
+## 1. Paired Pareto progressive optimizer — recommended
 
-**Leak-free features/encodings:** eight focused roots; explicit positive triggers and near-miss exclusions; root-level safety and exact-contract clauses; one-level references; fold-fit word 1–2 gram and character 3–5 gram TF-IDF; frozen description/full-body MiniLM embeddings; cross-encoder rerank margin; collision, activation-count, and compositional-query diagnostics; actual BenchFlow invocation traces from development only; same-task redacted success/failure contrasts; rejected-patch memory. Public tasks with answer/target leakage are quarantined, and final-holdout trajectories never enter authoring or calibration.
+**Leak-free features/encodings.** Freeze a grouped 25% holdout before authoring. Use only participant-visible instructions and safe metadata; keep verifier/oracle bytes opaque. Quarantine issue-flagged tasks from every primary stage. Fit word 1–2 gram and character 3–5 gram TF-IDF on outer-train prompts plus immutable candidate text. Render every skill as `name | description | body`; use the pinned R3 embedding query path and R3 cross-encoder reranker with body-only truncation. Add fold-local dense projections, lexical/full-body collision, request action/no-action and authority features, token cost, set compatibility, and actual invocation/paired/safety/latency traces. All statistics are train-fit then validation/holdout-apply.
 
-**Models and concrete settings:** deterministic compiler; `all-MiniLM-L6-v2`; `ms-marco-MiniLM-L-6-v2`; per-skill balanced logistic regression (`C=1.0`, `max_iter=1000`); optional local Qwen3-8B-AWQ proposer (`temperature=0.2`, `top_p=0.9`, `max_new_tokens=1536`, batch 1); maximum 8 skills, 3 activations, 8 description variants per skill, 2 patches per iteration, 12 changed lines, 8% token-change cap, 3 iterations. Promotion uses official matched paired lift and a hard safety gate.
+**Models + key hyperparameters.** Exact-pinned `tencent/R3-embedding-0.6b` and `tencent/R3-rerank-0.6b`, frozen and sequential. RTX3060 defaults: FP16, sequence 1,792, OOM floor 1,024, embedding batch 2, rerank batch 1, recall 20, rerank top 8. Train a 256-dimensional dual projection head for 2 epochs (`lr=1e-4`, temperature 0.05, six hard negatives, weight decay 0.01), 32-hidden fusion and compatibility MLPs for 20 epochs (`lr=1e-3`, dropout 0.10), balanced logistic calibrators (`C=1`, 2,000 iterations), and Ridge patch value (`alpha=10`). Three optimizer iterations, two patch candidates each, at most four atomic edits, 12 lines, or 8% of the target skill. Optional Qwen3-8B-AWQ proposer is 4-bit, batch 1, temperature 0.2, top-p 0.9, 768 new tokens.
 
-**Runtime/memory:** 10–24 hours including paired agent evaluation; 8–11.5 GB VRAM while the AWQ proposer is loaded, otherwise roughly 2–4 GB. **Leakage risk:** trajectory overfit, contaminated public packages, or task wording copied into patches. **Fallback:** deterministic failure-category patches, incumbent rollback, lexical-only routing, smaller batches/chunks/candidate breadth, but never disable paired validation or safety.
+**Expected runtime/memory.** Roughly 18–22 hours with shared caches; 6–10 GB VRAM for sequential R3 stages, with the optional proposer near the 12 GB ceiling.
 
-## 2. Scripted progressive static portfolio
+**Leakage risk.** High if holdout isolation, sanitized no-skill controls, quarantine, or evaluator-view separation is weakened. Routing scores are never acceptance evidence. Promotion requires real paired gain, non-negative bootstrap lower-bound change, zero critical safety failures, and bounded domain/timeout regression.
 
-**Leak-free features/encodings:** the same eight hand-authored roots, deterministic artifact scripts, synthetic difficult near-misses, grouped routing folds, frozen blind routing set, and safe public metadata used only for diagnostics. **Models/settings:** deterministic compiler plus the same MiniLM/reranker/logistic screen; 8 roots, 3-skill cap, 3 folds, 3 cheap seeds, 64 description candidates, 12-task paired development screen, 20-task final holdout. **Runtime/memory:** 2–6 hours before paired evaluation; 2–4 GB VRAM. **Leakage risk:** proxy routing may improve while paired lift falls. **Fallback:** original descriptions with a fixed 0.60 word/0.40 character TF-IDF screen and actual BenchFlow selection only.
+**Fallback.** Use pinned SkillRouter, then pinned MiniLM, then outer-train lexical features. If `sentence-transformers` is absent, install it through the locked project or implement an audited local adapter; do not silently fall back to generic mean pooling. If the proposer is unavailable, use deterministic failure-category patches. If official paired execution is unavailable, emit `readiness=false` and no lift claim. The official R3 code/model cards define the correct two-stage contract. ([GitHub][3])
 
-## 3. Flat exact-contract ablation
+## 2. Compact three-skill core — low-interference challenger
 
-**Leak-free features/encodings:** six self-contained roots with no references, semantic-parity matrix, the same safety/contract clauses, static lint, and grouped paired evaluation. **Models/settings:** deterministic compiler and lexical activation screen; 6 skills, 2-skill routing cap for the proxy, 4,200-token/380-line root ceiling, no references, up to 2 scripts per skill. **Runtime/memory:** under 1 hour excluding paired runs; CPU or under 2 GB VRAM. **Leakage risk:** context bloat and instruction conflict rather than data leakage. **Fallback:** retain the progressive portfolio unless the flat candidate improves exact-output/long-artifact slices without any safety, timeout, or domain regression.
+**Leak-free features/encodings.** Reuse the exact split, quarantine, authoring/evaluator separation, no-skill cache, generated hard negatives, R3/lexical transforms, request-risk gate, and paired traces. Merge into three roots only after semantic-parity checks against the eight-skill source portfolio.
 
-## 4. Mandatory broad reference control
+**Models + key hyperparameters.** Same pinned R3 embedding path; 256-dimensional projection head for 2 epochs at `1e-4`; 32-hidden fusion head for 20 epochs at `1e-3`; balanced logistic calibration; six description variants per root; preferred one active skill, hard cap two; target 950 tokens and maximum 1,400; body editing disabled.
 
-**Leak-free features/encodings:** one independently authored generic plan–execute–verify skill, frontmatter/archive/safety checks, and a non-procedural length-matched placebo. **Models/settings:** deterministic generator only; 1 skill, 2,500-token/220-line root ceiling, no references/scripts, 4-task paired sanity screen. **Runtime/memory:** minutes, CPU-only. **Leakage risk:** accidental copying from the notebook or a placebo becoming procedural. **Fallback:** never auto-promote; keep only as required provenance, reference reproduction, and writeup control.
+**Expected runtime/memory.** Four to six incremental hours after shared caches; 6–9 GB VRAM.
 
-The first pipeline is the serious run because it converts public paired failures into bounded, replay-tested edits while preserving a frozen holdout. The second is the mandatory rollback. Routing metrics are admission diagnostics, not the competition score; no candidate is promoted without real matched verifier evidence when the official runner is available. The research basis is SkillsBench’s focused-skill result, SkillOpt’s held-out textual optimizer, SkillCAT’s patch replay, SkillRouter’s body-aware shortlist, ClawsBench’s independent safety measurement, and skill-shadowing evidence. ([arXiv][1])
+**Leakage risk.** Lower task-memorization risk, but broad-root over-activation and omitted specialist procedure are material. A strong routing score can still mask weak paired execution.
+
+**Fallback.** Word-plus-character TF-IDF with calibrated thresholds. Split a root only after repeated paired failures identify a reusable cluster. SkillsBench reports that focused bundles can outperform exhaustive ones. ([arXiv][2])
+
+## 3. Six domain specialists with embedded safety — breadth challenger
+
+**Leak-free features/encodings.** Six specialist roots share the same concise authority, injection, confidentiality, least-privilege, and post-state contract. Use outer-train R3/lexical features, body collision, compatibility, token cost, request risk, invocation outcomes, and identical paired controls. No answer, verifier phrase, oracle content, or final-holdout outcome enters authoring.
+
+**Models + key hyperparameters.** Pinned R3 embedding and reranker; 256-dimensional projection head for 2 epochs at `1e-4`; 32-hidden fusion head for 20 epochs at `1e-3`; balanced logistic calibration; preferred one and maximum two active skills; two optimizer iterations, one patch each, no more than two atomic edits, eight lines, or 5% of the target; target 750 tokens and maximum 1,200.
+
+**Expected runtime/memory.** Six to eight incremental hours after shared caches; 6–9 GB VRAM.
+
+**Leakage risk.** Medium: duplicated safety text can create semantic collision, context bloat, over-refusal, and harmful composition.
+
+**Fallback.** Merge only an empirically colliding pair after semantic-parity and paired checks. If reranking is unavailable, retain dense embedding plus lexical collision. ClawsBench supports separate capability and unsafe-action accounting. ([arXiv][7])
+
+## Promotion and late ablations
+
+Run one full seed and three full folds for pipeline 1; share immutable embeddings, task split, no-skill baselines, and model hashes with challengers. Advance at most two libraries to expensive paired evaluation. Select by fail-fast-adjusted mean paired lift, then bootstrap lower bound, per-domain breadth, negative-delta count, unsafe-action count, over-refusal, timeout, token cost, and simplicity. After the winner is frozen, test SkillReducer-style compression and accept it only if semantic parity, mandatory safety clauses, source-task replay, and paired evidence are non-decreasing. ([arXiv][8])

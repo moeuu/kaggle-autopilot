@@ -29,6 +29,10 @@ _OUTPUT_REQUIREMENT_MARKERS = (
     "save as",
     "saved as",
 )
+_ARCHIVE_REQUIREMENT_RE = re.compile(
+    r"\b(?:submit|upload|provide)\s+(?:a|an|one)\s+(?:single\s+)?(?:`?\.(?:zip|tar|rar)`?|archive)\b",
+    re.IGNORECASE,
+)
 _NOTEBOOK_REQUIREMENT_PATTERNS = (
     re.compile(r"\b(?:one|a|the)\s+(?:kaggle\s+)?notebook\s*\(required\)", re.IGNORECASE),
     re.compile(r"\brequires?\s+(?:one|a|the)?\s*(?:kaggle\s+)?notebook\b", re.IGNORECASE),
@@ -170,12 +174,26 @@ def _explicit_output_names(payload: dict[str, object]) -> list[str]:
 
 def _required_output_names_from_text(text: str) -> list[str]:
     names: list[str] = []
-    for raw_line in text.splitlines():
+    lines = text.splitlines()
+    archive_contract_pending = 0
+    for raw_line in lines:
         line = raw_line.strip()
         lowered = line.lower()
-        if not line or not any(marker in lowered for marker in _OUTPUT_REQUIREMENT_MARKERS):
+        if not line:
+            archive_contract_pending = max(0, archive_contract_pending - 1)
             continue
-        names.extend(_filenames(line))
+        line_names = _filenames(line)
+        if any(marker in lowered for marker in _OUTPUT_REQUIREMENT_MARKERS):
+            names.extend(line_names)
+        if _ARCHIVE_REQUIREMENT_RE.search(line):
+            names.extend(name for name in line_names if Path(name).suffix.lower() in {".zip", ".tar", ".rar"})
+            archive_contract_pending = 8
+        elif archive_contract_pending > 0:
+            if any(Path(name).suffix.lower() in {".zip", ".tar", ".rar"} for name in line_names):
+                names.extend(line_names)
+                archive_contract_pending = 0
+            else:
+                archive_contract_pending -= 1
     return names
 
 

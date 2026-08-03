@@ -169,7 +169,12 @@ def build_repair_write_policy(
         repo_root=repo_root,
         denied_prefixes=[data_dir, kernels_dir],
         extra_allowed_prefixes=extra_allowed,
-        snapshot_prefixes=[data_dir.parent / "kernel", data_dir, kernels_dir],
+        # Always include the loaded source tree.  Repair artifacts commonly live
+        # outside the repository (for example under /data), and a policy made
+        # only from those paths produced an empty repository snapshot.  That let
+        # an agent edit src/ without the parent process noticing that its loaded
+        # code was stale.
+        snapshot_prefixes=[module_src_root, data_dir.parent / "kernel", data_dir, kernels_dir],
     )
 
 

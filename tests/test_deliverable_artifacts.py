@@ -76,3 +76,22 @@ def test_writeup_detects_attached_public_notebook_requirement(tmp_path: Path) ->
     contract = resolve_deliverable_artifact_contract(competition_dir)
 
     assert contract.requires_notebook is True
+
+
+def test_writeup_detects_archive_named_in_following_structure_block(tmp_path: Path) -> None:
+    competition_dir = tmp_path / "demo"
+    context_dir = competition_dir / "context"
+    context_dir.mkdir(parents=True)
+    (competition_dir / "plan.json").write_text(
+        json.dumps({"deliverable_mode": "writeup", "submit_mode": "file"}),
+        encoding="utf-8",
+    )
+    (context_dir / "overview.md").write_text(
+        "Submit a single `.zip` with this structure:\n\n"
+        "```\nsubmission.zip\n└── skills/\n    └── example/SKILL.md\n```\n",
+        encoding="utf-8",
+    )
+
+    contract = resolve_deliverable_artifact_contract(competition_dir)
+
+    assert contract.required_output_names == ("submission.zip",)

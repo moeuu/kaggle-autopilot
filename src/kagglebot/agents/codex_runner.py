@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
+from typing import IO
 
 from kagglebot.agents.identity import IMPLEMENTATION_AGENT, render_prompt_identity
 from kagglebot.agents.sandbox_fallback import (
@@ -79,6 +85,32 @@ def run_codex(
             working_directory=str(cwd.resolve()) if cwd is not None else None,
         )
 
+    with _repository_agent_lock(cwd):
+        return _run_codex_unlocked(
+            prompt_text=prompt_text,
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
+            heartbeat_label=heartbeat_label,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            reasoning_profile=reasoning_profile,
+            cli_profile=cli_profile,
+            cwd=cwd,
+        )
+
+
+def _run_codex_unlocked(
+    *,
+    prompt_text: str,
+    transcript_path: Path,
+    last_message_path: Path,
+    heartbeat_label: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    reasoning_profile: str | None,
+    cli_profile: str | None,
+    cwd: Path | None,
+) -> CodexResult:
     args = [IMPLEMENTATION_AGENT.cli_command, "exec"]
     if cli_profile:
         args += ["--profile", cli_profile]
@@ -189,6 +221,37 @@ def run_codex(
         cli_profile=cli_profile,
         working_directory=str(cwd.resolve()) if cwd is not None else None,
     )
+
+
+def _repository_agent_lock_path(cwd: Path) -> Path:
+    resolved = str(cwd.resolve())
+    digest = sha256(resolved.encode("utf-8")).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / "kagglebot-agent-locks" / f"repo-{digest}.lock"
+
+
+@contextmanager
+def _repository_agent_lock(cwd: Path | None) -> Iterator[None]:
+    """Serialize Codex sessions that can edit the same repository."""
+    if cwd is None:
+        yield
+        return
+    lock_path = _repository_agent_lock_path(cwd)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle: IO[str] = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"{_RUNNER_LABEL}: waiting for repository edit lock {lock_path}", flush=True)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"pid={os.getpid()} cwd={cwd.resolve()}\n")
+        handle.flush()
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def _build_shared_args(

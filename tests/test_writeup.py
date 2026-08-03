@@ -228,6 +228,52 @@ def test_build_writeup_bundle_creates_report_and_metadata(tmp_path: Path) -> Non
     assert "Use this section to" not in report_text
 
 
+def test_build_writeup_bundle_seals_external_evaluation_report_and_archive(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="skill-demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text(
+        json.dumps({"deliverable_mode": "writeup", "submit_mode": "file", "track": "static_skills"}),
+        encoding="utf-8",
+    )
+    paths.overview_md_path.write_text(
+        "This judged hackathon requires a Writeup. Submit a single `.zip` with this structure:\n"
+        "```\nsubmission.zip\n└── skills/example/SKILL.md\n```\n"
+        "The Writeup must be no more than 2000 words.\n",
+        encoding="utf-8",
+    )
+    iter_dir = paths.iter_dir("run-1", 1)
+    iter_dir.mkdir(parents=True)
+    archive = iter_dir / "submission.zip"
+    archive.write_bytes(b"validated archive")
+    source_report = tmp_path / "kernel-writeup.md"
+    source_report.write_text(
+        "# Skill Demo\n\n" + "Evidence-backed external evaluation report. " * 100 + "\n",
+        encoding="utf-8",
+    )
+
+    bundle = build_writeup_bundle(
+        paths=paths,
+        run_id="run-1",
+        iteration=1,
+        resolved={"deliverable_mode": "writeup", "target_direction": "maximize", "track": "static_skills"},
+        evaluation=None,
+        metrics_payload={
+            "selected_pipeline": "static_skill_portfolio",
+            "cv_metric_name": "routing_screening_objective",
+            "cv_metric_value": 0.75,
+        },
+        top1_info=None,
+        source_report_path=source_report,
+    )
+
+    assert bundle["status"] == "ready_for_submit"
+    assert bundle["external_evaluation_required"] is True
+    assert bundle["track"] == "static_skills"
+    assert bundle["artifact_contract"]["requires_resource_attachment"] is True
+    assert bundle["required_artifacts"][0]["name"] == "submission.zip"
+    assert Path(str(bundle["report_path"])).read_text(encoding="utf-8") == source_report.read_text(encoding="utf-8")
+
+
 def test_writeup_notebook_artifact_is_validated_before_submit(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)

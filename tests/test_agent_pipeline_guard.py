@@ -367,6 +367,7 @@ def _structured_contract_paths(
     *,
     data_ready: bool,
     deliverable_mode: str = "leaderboard",
+    unavailable_profile_status: str = "missing_required_files",
 ) -> tuple[CompetitionPaths, Path]:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.kernel_source_dir.mkdir(parents=True)
@@ -382,7 +383,7 @@ def _structured_contract_paths(
         ),
         encoding="utf-8",
     )
-    profile = {"status": "missing_required_files"}
+    profile = {"status": unavailable_profile_status}
     if data_ready:
         (paths.data_dir / "train.csv").write_text("feature,target\n1,0\n", encoding="utf-8")
         profile = {"status": "ok", "train_file": "train.csv"}
@@ -413,7 +414,34 @@ def test_missing_data_accepts_contract_and_expected_full_entrypoint_block(tmp_pa
     assert not list(paths.base_dir.rglob("*.pth"))
 
 
-def test_observed_data_contract_block_is_accepted_when_training_data_is_unavailable(
+def test_truthy_readiness_result_with_unavailable_status_accepts_expected_block(
+    tmp_path: Path,
+) -> None:
+    paths, kernel_path = _structured_contract_paths(
+        tmp_path,
+        data_ready=False,
+        deliverable_mode="writeup",
+        unavailable_profile_status="non_tabular_data",
+    )
+    _write_structured_contract_kernel(kernel_path)
+
+    readiness = agent_pipeline.assess_local_training_data(paths)
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert bool(readiness) is True
+    assert readiness.ready is False
+    assert readiness.reason == "labeled_training_source_missing"
+    assert result.passed is True
+    assert result.contract_only is True
+    assert result.data_ready is False
+    assert result.data_readiness_reason == "labeled_training_source_missing"
+    assert not result.normal_smoke_issues
+    formatted = agent_pipeline._format_kernel_contract_smoke(result)
+    assert "training data readiness: unavailable (labeled_training_source_missing)" in formatted
+    assert "blocked_missing_competition_training_data (expected)" in formatted
+
+
+def test_observed_data_contract_block_is_rejected_when_training_data_is_unavailable(
     tmp_path: Path,
 ) -> None:
     paths, kernel_path = _structured_contract_paths(
@@ -428,14 +456,15 @@ def test_observed_data_contract_block_is_accepted_when_training_data_is_unavaila
 
     result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
 
-    assert result.passed is True
-    assert result.contract_only is True
+    assert result.passed is False
+    assert result.contract_only is False
     assert result.normal_smoke_returncode == 2
-    assert not result.normal_smoke_issues
-    assert "controlled missing-training-data block" in "\n".join(result.warnings)
+    issues = "\n".join(result.normal_smoke_issues)
+    assert "error_type must be DataDiscoveryError" in issues
+    assert "reason_code must be 'missing_raw_training_assets'" in issues
 
 
-def test_missing_data_probe_accepts_observed_structured_data_contract_block(tmp_path: Path) -> None:
+def test_missing_data_probe_rejects_observed_structured_data_contract_block(tmp_path: Path) -> None:
     payload = {
         "status": "blocked",
         "error_type": "DataContractError",
@@ -454,7 +483,9 @@ def test_missing_data_probe_accepts_observed_structured_data_contract_block(tmp_
         training_data_unavailable=True,
     )
 
-    assert issues == ()
+    rendered = "\n".join(issues)
+    assert "error_type must be DataDiscoveryError" in rendered
+    assert "reason_code must be 'missing_raw_training_assets'" in rendered
 
 
 @pytest.mark.parametrize(
@@ -503,7 +534,11 @@ def test_missing_data_probe_rejects_incomplete_final_stderr_json(tmp_path: Path)
     assert "readable JSON object" in "\n".join(issues)
 
 
-def test_missing_data_probe_rejects_submission_claim_or_artifact(tmp_path: Path) -> None:
+@pytest.mark.parametrize("artifact_name", ["submission.csv", "submission.zip"])
+def test_missing_data_probe_rejects_submission_claim_or_artifact(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
     payload = {
         "status": "blocked",
         "error_type": "DataDiscoveryError",
@@ -522,7 +557,7 @@ def test_missing_data_probe_rejects_submission_claim_or_artifact(tmp_path: Path)
     assert "submission_written=false" in "\n".join(claimed_issues)
 
     payload["submission_written"] = False
-    (tmp_path / "submission.csv").write_text("id,prediction\n1,0\n", encoding="utf-8")
+    (tmp_path / artifact_name).write_text("probe artifact", encoding="utf-8")
     artifact_issues = agent_pipeline._missing_data_probe_issues(
         returncode=2,
         stderr=json.dumps(payload),
@@ -531,14 +566,49 @@ def test_missing_data_probe_rejects_submission_claim_or_artifact(tmp_path: Path)
     )
 
     assert "created prohibited" in "\n".join(artifact_issues)
-    assert "submission.csv" in "\n".join(artifact_issues)
+    assert artifact_name in "\n".join(artifact_issues)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "reason_code", "expected_issue"),
+    [
+        (1, "", "missing_raw_training_assets", "expected return code 2"),
+        (2, "unexpected output\n", "missing_raw_training_assets", "must not emit stdout"),
+        (2, "", "wrong_reason", "reason_code must be 'missing_raw_training_assets'"),
+    ],
+)
+def test_missing_data_probe_rejects_adversarial_variants(
+    tmp_path: Path,
+    returncode: int,
+    stdout: str,
+    reason_code: str,
+    expected_issue: str,
+) -> None:
+    payload = {
+        "status": "blocked",
+        "error_type": "DataDiscoveryError",
+        "reason_code": reason_code,
+        "message": "Raw labeled training assets were not found.",
+        "submission_written": False,
+    }
+
+    issues = agent_pipeline._missing_data_probe_issues(
+        returncode=returncode,
+        stdout=stdout,
+        stderr=json.dumps(payload),
+        staging_root=tmp_path,
+        training_data_unavailable=True,
+    )
+
+    assert expected_issue in "\n".join(issues)
 
 
 def test_missing_data_probe_rejects_block_when_training_data_is_ready(tmp_path: Path) -> None:
     payload = {
         "status": "blocked",
-        "error_type": "DataContractError",
-        "message": "No competition data root found.",
+        "error_type": "DataDiscoveryError",
+        "reason_code": "missing_raw_training_assets",
+        "message": "Raw labeled training assets were not found.",
         "submission_written": False,
     }
 
@@ -1283,6 +1353,19 @@ def test_ready_data_keeps_normal_data_discovery_failure_fatal(tmp_path: Path) ->
     assert result.normal_smoke_returncode == 2
     assert "DataDiscoveryError" in result.normal_smoke_stderr
     assert "training data readiness is available" in "\n".join(result.normal_smoke_issues)
+
+
+def test_ready_data_accepts_successful_normal_probe(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=True)
+    _write_structured_contract_kernel(kernel_path, normal_mode="success")
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is True
+    assert result.contract_only is False
+    assert result.data_ready is True
+    assert result.normal_smoke_returncode == 0
+    assert not result.normal_smoke_issues
 
 
 @pytest.mark.parametrize(
@@ -2418,6 +2501,7 @@ def test_build_repair_write_policy_allows_src_and_denies_data_and_kernels(tmp_pa
     assert repo_root / "artifacts" / "demo" / "data" in policy.denied_prefixes
     assert repo_root / "artifacts" / "demo" / "kernels" in policy.denied_prefixes
     assert policy.snapshot_prefixes == (
+        repo_root / "src",
         repo_root / "artifacts" / "demo" / "kernel",
         repo_root / "artifacts" / "demo" / "data",
         repo_root / "artifacts" / "demo" / "kernels",
@@ -2526,12 +2610,13 @@ def test_snapshot_tree_prunes_noise_directories(tmp_path: Path) -> None:
 
 
 def test_snapshot_tree_scopes_repair_policy_to_current_competition_paths(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "kagglebot" / "autopilot.py"
     kernel = tmp_path / "artifacts" / "demo" / "kernel" / "kernel.py"
     data = tmp_path / "artifacts" / "demo" / "data" / "train.csv"
     staged = tmp_path / "artifacts" / "demo" / "kernels" / "run-1" / "kernel.py"
     historical = tmp_path / "artifacts" / "demo" / "kernels" / "old-run" / "kernel.py"
     unrelated = tmp_path / "artifacts" / "other" / "kernel" / "kernel.py"
-    for path in (kernel, data, staged, historical, unrelated):
+    for path in (source, kernel, data, staged, historical, unrelated):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(path.name, encoding="utf-8")
     policy = write_guard.build_repair_write_policy(
@@ -2543,6 +2628,7 @@ def test_snapshot_tree_scopes_repair_policy_to_current_competition_paths(tmp_pat
 
     snapshot = write_guard._snapshot_tree(tmp_path, policy)
 
+    assert source.relative_to(tmp_path).as_posix() in snapshot
     assert kernel.relative_to(tmp_path).as_posix() in snapshot
     assert data.relative_to(tmp_path).as_posix() in snapshot
     assert staged.relative_to(tmp_path).as_posix() in snapshot

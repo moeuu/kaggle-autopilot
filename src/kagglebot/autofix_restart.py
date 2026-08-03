@@ -4,6 +4,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 
 from kagglebot.json_utils import load_json_object_or_empty, write_json_object
@@ -15,10 +16,15 @@ RESUME_RUN_ID_ENV = "KAGGLEBOT_RESUME_RUN_ID"
 RESUME_SLUG_ENV = "KAGGLEBOT_RESUME_SLUG"
 
 
+class SourceReloadLoopError(SystemExit):
+    """Stop a stale process when one source generation already requested reload."""
+
+
 def maybe_restart_for_src_changes(
     *,
     dry_run: bool,
     run_dir: Path,
+    repo_root: Path,
     run_id: str,
     slug: str,
     changed: list[str],
@@ -32,20 +38,29 @@ def maybe_restart_for_src_changes(
     if not any(path.startswith("src/") for path in changed):
         return False
 
+    source_fingerprint = source_tree_fingerprint(repo_root)
     state_path = run_dir / RESTART_STATE_FILENAME
     state = _load_restart_state(state_path)
     stage_family = restart_stage_family(stage)
     counts_by_stage = _restart_counts_by_stage(state)
     stage_count = int(counts_by_stage.get(stage_family, 0))
-    if stage_count >= max_restarts:
-        print(f"[yellow]autofix[/yellow]: src changes detected in {stage}, restart limit reached")
-        return False
+    raw_source_counts = state.get("counts_by_source")
+    counts_by_source = dict(raw_source_counts) if isinstance(raw_source_counts, dict) else {}
+    source_count = int(counts_by_source.get(source_fingerprint, 0))
+    if source_count >= max(1, max_restarts):
+        raise SourceReloadLoopError(
+            "Source reload did not advance to the new code generation; refusing to continue in a stale process "
+            f"(stage={stage}, source={source_fingerprint[:12]})."
+        )
 
     counts_by_stage[stage_family] = stage_count + 1
+    counts_by_source[source_fingerprint] = source_count + 1
     state["counts_by_stage"] = counts_by_stage
+    state["counts_by_source"] = counts_by_source
     state["count"] = sum(counts_by_stage.values())
     state["last_stage"] = stage
     state["last_stage_family"] = stage_family
+    state["last_source_fingerprint"] = source_fingerprint
     write_json_object(state_path, state)
     print(
         f"[yellow]autofix[/yellow]: src changes detected in {stage}; "
@@ -55,6 +70,24 @@ def maybe_restart_for_src_changes(
     os.environ[RESUME_SLUG_ENV] = slug
     os.execv(sys.executable, [sys.executable, *sys.argv])
     return True
+
+
+def source_tree_fingerprint(repo_root: Path) -> str:
+    """Hash the complete source generation that an exec restart must reload."""
+    source_root = repo_root.resolve() / "src"
+    digest = sha256()
+    if not source_root.is_dir():
+        digest.update(b"missing-src\0")
+        return digest.hexdigest()
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
+        relative = path.relative_to(repo_root.resolve()).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def restart_stage_family(stage: str) -> str:

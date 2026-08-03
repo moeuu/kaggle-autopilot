@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kagglebot.autofix_restart import (
+    SourceReloadLoopError,
     kernel_regenerate_marker_path,
     kernel_regeneration_already_marked,
     maybe_regenerate_kernel_sources_once,
     maybe_restart_for_src_changes,
+    source_tree_fingerprint,
     write_kernel_regeneration_marker,
     write_kernel_regeneration_note,
 )
@@ -172,6 +176,9 @@ def test_maybe_restart_for_src_changes_allows_new_stage_family_after_legacy_rest
 ) -> None:
     run_dir = tmp_path / "runs" / "run-1"
     run_dir.mkdir(parents=True, exist_ok=True)
+    source_path = tmp_path / "src" / "kagglebot" / "solver" / "io.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     state_path = run_dir / "autofix_restart.json"
     state_path.write_text(
@@ -189,6 +196,7 @@ def test_maybe_restart_for_src_changes_allows_new_stage_family_after_legacy_rest
     restarted = maybe_restart_for_src_changes(
         dry_run=False,
         run_dir=run_dir,
+        repo_root=tmp_path,
         run_id="run-1",
         slug="demo",
         changed=["src/kagglebot/solver/io.py"],
@@ -205,13 +213,25 @@ def test_maybe_restart_for_src_changes_allows_new_stage_family_after_legacy_rest
     assert state["counts_by_stage"]["autofix"] == 1
 
 
-def test_maybe_restart_for_src_changes_blocks_second_restart_in_same_stage_family(monkeypatch, tmp_path: Path) -> None:
+def test_maybe_restart_for_src_changes_fails_closed_for_same_source_generation(monkeypatch, tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "run-1"
     run_dir.mkdir(parents=True, exist_ok=True)
+    source_path = tmp_path / "src" / "kagglebot" / "autopilot.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("VALUE = 1\n", encoding="utf-8")
+    fingerprint = source_tree_fingerprint(tmp_path)
 
     state_path = run_dir / "autofix_restart.json"
     state_path.write_text(
-        json.dumps({"counts_by_stage": {"autofix": 1}, "count": 1, "last_stage": "autofix_attempt_1"}, indent=2),
+        json.dumps(
+            {
+                "counts_by_stage": {"autofix": 1},
+                "counts_by_source": {fingerprint: 1},
+                "count": 1,
+                "last_stage": "autofix_attempt_1",
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -222,15 +242,49 @@ def test_maybe_restart_for_src_changes_blocks_second_restart_in_same_stage_famil
 
     monkeypatch.setattr("kagglebot.autofix_restart.os.execv", fake_execv)
 
-    restarted = maybe_restart_for_src_changes(
+    with pytest.raises(SourceReloadLoopError, match="refusing to continue in a stale process"):
+        maybe_restart_for_src_changes(
+            dry_run=False,
+            run_dir=run_dir,
+            repo_root=tmp_path,
+            run_id="run-1",
+            slug="demo",
+            changed=["src/kagglebot/autopilot.py"],
+            stage="autofix_attempt_2",
+            max_restarts=1,
+        )
+
+    assert execv_calls == []
+
+
+def test_maybe_restart_for_src_changes_restarts_each_distinct_source_generation(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    source_path = tmp_path / "src" / "kagglebot" / "autopilot.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("VALUE = 1\n", encoding="utf-8")
+    first_fingerprint = source_tree_fingerprint(tmp_path)
+    (run_dir / "autofix_restart.json").write_text(
+        json.dumps({"counts_by_source": {first_fingerprint: 1}}),
+        encoding="utf-8",
+    )
+    source_path.write_text("VALUE = 2\n", encoding="utf-8")
+    execv_calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        "kagglebot.autofix_restart.os.execv",
+        lambda executable, argv: execv_calls.append((executable, argv)),
+    )
+
+    assert maybe_restart_for_src_changes(
         dry_run=False,
         run_dir=run_dir,
+        repo_root=tmp_path,
         run_id="run-1",
         slug="demo",
         changed=["src/kagglebot/autopilot.py"],
         stage="autofix_attempt_2",
         max_restarts=1,
     )
-
-    assert restarted is False
-    assert execv_calls == []
+    assert len(execv_calls) == 1
+    state = json.loads((run_dir / "autofix_restart.json").read_text(encoding="utf-8"))
+    assert state["last_source_fingerprint"] != first_fingerprint
