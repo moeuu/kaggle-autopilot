@@ -17,6 +17,8 @@ def test_resolve_explicit_rtx3060_profile() -> None:
     rendered = render_hardware_constraints(profile, compute="local_gpu")
     assert "Planning time budget: <= 1440 minutes per kernel iteration" in rendered
     assert "RTX3060-class accuracy-first rule" in rendered
+    assert "never tokenizer-truncate expanded image/video tokens" in rendered
+    assert "clear exception tracebacks" in rendered
 
 
 def test_resolve_explicit_rtx5090_profile() -> None:

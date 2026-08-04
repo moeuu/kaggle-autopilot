@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from kagglebot import local_kernel_limits
@@ -72,6 +73,7 @@ def apply_local_runtime_env_defaults(
     env.setdefault("KAGGLEBOT_TORCH_SHARING_STRATEGY", "file_system")
     env.setdefault("KAGGLEBOT_LOCAL_NOFILE", "4096")
     env.setdefault(local_kernel_limits.STALL_ENV, str(int(local_kernel_limits.DEFAULT_STALL_SEC)))
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     env.setdefault("PYTHONUNBUFFERED", "1")
     env["KAGGLEBOT_DO_TRAIN"] = "1"
     env["KAGGLEBOT_FORCE_TRAIN"] = "1"
@@ -82,6 +84,7 @@ def apply_local_runtime_env_defaults(
     notes.append(f"defaulting KAGGLEBOT_TORCH_SHARING_STRATEGY={env['KAGGLEBOT_TORCH_SHARING_STRATEGY']}")
     notes.append(f"defaulting KAGGLEBOT_LOCAL_NOFILE={env['KAGGLEBOT_LOCAL_NOFILE']}")
     notes.append(f"defaulting {local_kernel_limits.STALL_ENV}={env[local_kernel_limits.STALL_ENV]}")
+    notes.append(f"defaulting PYTORCH_CUDA_ALLOC_CONF={env['PYTORCH_CUDA_ALLOC_CONF']}")
     notes.append(f"defaulting PYTHONUNBUFFERED={env['PYTHONUNBUFFERED']}")
 
     if not module_available("xgboost"):
@@ -110,6 +113,16 @@ def detect_cuda_oom(text: str) -> bool:
     if "mps" in lowered and "out of memory" in lowered:
         return True
     return False
+
+
+def kernel_source_supports_llm_disable_fallback(source: str) -> bool:
+    """Require an explicit kernel opt-in before changing generic LLM knobs."""
+    return bool(
+        re.search(
+            r"(?m)^\s*KAGGLEBOT_SUPPORTS_LLM_DISABLE_FALLBACK\s*=\s*True\b",
+            source,
+        )
+    )
 
 
 def apply_local_kernel_oom_fallback_env(env: dict[str, str]) -> list[str]:

@@ -4181,6 +4181,7 @@ def test_run_kernel_local_retries_cuda_oom_by_disabling_llm(tmp_path: Path, monk
                 "import sys",
                 "from pathlib import Path",
                 "",
+                "KAGGLEBOT_SUPPORTS_LLM_DISABLE_FALLBACK = True",
                 "if os.getenv('ENABLE_LLM', '1') != '0':",
                 "    sys.stderr.write('torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.00 MiB\\n')",
                 "    raise SystemExit(1)",
@@ -4214,6 +4215,39 @@ def test_run_kernel_local_retries_cuda_oom_by_disabling_llm(tmp_path: Path, monk
     assert result.metrics_path is not None and result.metrics_path.exists()
     logs_dir = tmp_path / "demo" / "runs" / "run-oom" / "iter-1" / "logs"
     assert (logs_dir / "local_kernel_stdout_oom_retry.log").exists()
+
+
+def test_run_kernel_local_does_not_apply_undeclared_llm_oom_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ENABLE_LLM", raising=False)
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "import sys\nsys.stderr.write('torch.OutOfMemoryError: CUDA out of memory\\n')\nraise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KernelFailedError, match="CUDA out of memory"):
+        run_kernel_local(
+            slug="demo",
+            run_id="run-custom-oom",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            holdout_frac=0.2,
+            cv_folds=3,
+            seed=42,
+            dry_run=False,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+    logs_dir = tmp_path / "demo" / "runs" / "run-custom-oom" / "iter-1" / "logs"
+    assert not (logs_dir / "local_kernel_stdout_oom_retry.log").exists()
 
 
 def test_run_kernel_local_rejects_staged_plan_with_sequence_hyperparameters(tmp_path: Path) -> None:

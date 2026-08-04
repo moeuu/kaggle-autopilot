@@ -185,6 +185,12 @@ def render_hardware_constraints(profile: HardwareProfile, *, compute: str, time_
                 "because the GPU has 12GB VRAM.",
                 "- RTX3060-class scaling rule: prefer smaller batches, lower-but-useful resolution, chunking, "
                 "4-bit/quantized loading, cached embeddings, or sequential candidates before dropping model families.",
+                "- RTX3060-class multimodal rule: never tokenizer-truncate expanded image/video tokens. Preflight one "
+                "real training batch and make the first rung use a feasible pixel/view budget; reduce visual tokens "
+                "before changing model families.",
+                "- RTX3060-class OOM-ladder rule: before loading the next rung in one Python process, clear exception "
+                "tracebacks that can retain partial CUDA models, release optimizer/batch references, run garbage "
+                "collection, and empty the CUDA cache.",
                 "- RTX3060-class runtime rule: long local runs are acceptable when they keep a materially stronger "
                 "candidate alive; use watchdogs/checkpoints instead of replacing it with a weak geometry baseline.",
             ]

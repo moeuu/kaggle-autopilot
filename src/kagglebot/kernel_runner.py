@@ -1329,11 +1329,16 @@ def run_kernel_local(
         combined = "\n".join(part for part in [result.stdout, result.stderr] if part)
         enable_llm_env = env.get("ENABLE_LLM")
         llm_disabled_by_env = enable_llm_env is not None and not _local_kernel_runtime_env.env_truthy(enable_llm_env)
+        cuda_oom = _local_kernel_runtime_env.detect_cuda_oom(combined)
+        supports_llm_disable = _local_kernel_runtime_env.kernel_source_supports_llm_disable_fallback(
+            kernel_path.read_text(encoding="utf-8", errors="replace")
+        )
         if (
             accelerator == "gpu"
             and not strict_accelerator
             and not llm_disabled_by_env
-            and _local_kernel_runtime_env.detect_cuda_oom(combined)
+            and cuda_oom
+            and supports_llm_disable
         ):
             retry_env = env.copy()
             retry_notes = _local_kernel_runtime_env.apply_local_kernel_oom_fallback_env(retry_env)
@@ -1383,6 +1388,12 @@ def run_kernel_local(
                 raise KernelFailedError(
                     f"Local kernel execution failed with CUDA OOM, then failed again after disabling LLM.{detail}"
                 )
+
+        if accelerator == "gpu" and not strict_accelerator and cuda_oom and not supports_llm_disable:
+            print(
+                "[yellow]kernel local[/yellow]: CUDA OOM detected, but the kernel does not declare ENABLE_LLM; "
+                "skipping an unsafe generic retry with unchanged custom pipelines"
+            )
 
         if result.returncode != 0:
             stdout_tail = truncate_lines(result.stdout[-4000:], max_lines=80)

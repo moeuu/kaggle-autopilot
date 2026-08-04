@@ -349,7 +349,8 @@ Submission behavior:
 - `--agent` and `--submit` are not part of autopilot CLI
 - RNA sequence/structure datasets with residue-level coordinate submissions are profiled as `rna_structure` instead of generic tabular when the schema matches that family.
 - Analyzer metadata also routes RNA sequence/structure layouts to `task=rna_structure`, preserving residue anchors and coordinate triplets for RMSE-based strategy planning.
-- Local kernel runs default to conservative worker/runtime guards: `KAGGLEBOT_NUM_WORKERS=0`, torch shared-memory fallback `file_system`, a best-effort higher `RLIMIT_NOFILE`, and a local stall watchdog so `watch` can fail and resume cleanly instead of showing a stale `local kernel running` state forever.
+- Local kernel runs default to conservative worker/runtime guards: `KAGGLEBOT_NUM_WORKERS=0`, torch shared-memory fallback `file_system`, CUDA allocator `expandable_segments:True`, a best-effort higher `RLIMIT_NOFILE`, and a local stall watchdog so `watch` can fail and resume cleanly instead of showing a stale `local kernel running` state forever.
+- The generic CUDA-OOM retry that sets `ENABLE_LLM=0` runs only when a kernel explicitly declares `KAGGLEBOT_SUPPORTS_LLM_DISABLE_FALLBACK = True`. Custom multimodal pipelines without that contract fail into the normal repair workflow instead of silently rerunning the same unchanged pipeline.
 - Submission schema handling is flexible:
   - supports ID-based alignment when an ID column exists
   - falls back to row-order alignment when no reliable ID column exists
