@@ -53,6 +53,10 @@ def test_leaderboard_contract_does_not_infer_arbitrary_data_filenames(tmp_path: 
         "Train with train.csv and evaluate against test.csv. See data.json for details.",
         encoding="utf-8",
     )
+    (context_dir / "data.md").write_text(
+        '- `image_file`: Filename of the label image (e.g., "1709398.jpeg")\n',
+        encoding="utf-8",
+    )
 
     contract = resolve_deliverable_artifact_contract(competition_dir)
 

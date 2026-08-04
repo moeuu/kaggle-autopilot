@@ -41,7 +41,9 @@ _NOTEBOOK_REQUIREMENT_PATTERNS = (
     re.compile(r"\bprivate\s+notebook\s+submission\b", re.IGNORECASE),
 )
 _EXCLUDED_REQUIRED_OUTPUT_NAMES = {
+    "e.g",
     "evaluation_report.json",
+    "i.e",
     "metrics.json",
     "plan.json",
     "sample_submission.csv",
@@ -122,7 +124,10 @@ def resolve_deliverable_artifact_contract(
             continue
         evidence_paths.append(path)
         context_texts.append(text)
-        output_names.extend(_required_output_names_from_text(text))
+        # data.md describes input assets and frequently contains lines such as
+        # "image filename (e.g. 123.jpeg)".  Those are not deliverable names.
+        if filename != "data.md":
+            output_names.extend(_required_output_names_from_text(text))
 
     requires_notebook = normalized_submit_mode == "notebook" or any(
         pattern.search(text) for text in context_texts for pattern in _NOTEBOOK_REQUIREMENT_PATTERNS
