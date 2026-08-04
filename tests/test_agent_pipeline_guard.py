@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -664,6 +665,7 @@ def test_contract_only_acceptance_promotes_kernel_and_records_environmental_bloc
     paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
     candidate_path = tmp_path / "candidate.py"
     candidate_path.write_text("print('validated candidate')\n", encoding="utf-8")
+    candidate_path.chmod(0o444)
     smoke = agent_pipeline.KernelContractSmokeResult(
         compile_returncode=0,
         compile_stdout="",
@@ -699,6 +701,7 @@ def test_contract_only_acceptance_promotes_kernel_and_records_environmental_bloc
     )
 
     assert kernel_path.read_text(encoding="utf-8") == "print('validated candidate')\n"
+    assert stat.S_IMODE(kernel_path.stat().st_mode) & stat.S_IWUSR
     verification = json.loads((paths.run_dir("run-1") / "implementation_verification.json").read_text(encoding="utf-8"))
     assert verification["status"] == "passed_contract_only"
     assert verification["blocked_reason"] == "missing_competition_data"

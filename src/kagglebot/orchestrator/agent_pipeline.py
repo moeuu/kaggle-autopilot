@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -886,6 +887,8 @@ def _promote_validated_kernel(candidate_path: Path, kernel_path: Path) -> None:
     temporary_path = Path(temporary_name)
     try:
         shutil.copy2(candidate_path, temporary_path)
+        candidate_mode = stat.S_IMODE(temporary_path.stat().st_mode)
+        temporary_path.chmod(candidate_mode | stat.S_IWUSR)
         os.replace(temporary_path, kernel_path)
     finally:
         temporary_path.unlink(missing_ok=True)
