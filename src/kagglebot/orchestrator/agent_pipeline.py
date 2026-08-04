@@ -1555,6 +1555,12 @@ def _kernel_candidate_contract_instructions(paths: CompetitionPaths) -> str:
         "- The framework compiles the generated kernel, imports it in an isolated subprocess to call "
         "`contract_smoke()`, and then runs `python kernel.py` as a separate data-discovery probe. Do not alter model "
         "or training settings to compensate for absent competition data.\n"
+        "- The full-entrypoint probe sets `KAGGLEBOT_IO_SCHEMA_SMOKE=1`, both `KAGGLEBOT_FAST_DEV=1` and the "
+        "legacy alias `FAST_DEV=1`, and both validation-sample-limit aliases to 2. It is network-offline and has a "
+        "180-second deadline. Handle the IO-schema flag after data discovery but before heavyweight preprocessing, "
+        "model resolution, downloads, training, scoring, or submission creation: validate the observed schema and "
+        "competition metric self-test, then exit zero. Missing data must still use the required status-2 block. "
+        "Normal execution must retain the frozen full model/training path.\n"
         "- If that full-entrypoint probe cannot find raw labeled training assets, exit with status 2, create no "
         "submission, and emit this final stderr JSON object: "
         '`{"status":"blocked","error_type":"DataDiscoveryError",'
@@ -1826,6 +1832,18 @@ def _run_kernel_contract_smoke(
             {
                 "KAGGLEBOT_FAST_DEV": "1",
                 "KAGGLEBOT_VALIDATION_MAX_SAMPLES": "2",
+                # Generated kernels historically used these unprefixed names.
+                # Keep both spellings in sync so an otherwise valid contract
+                # smoke cannot accidentally launch a full training run.
+                "FAST_DEV": "1",
+                "VALIDATION_MAX_SAMPLES": "2",
+                # Contract validation must be deterministic and must never
+                # download a heavyweight model or dataset as a side effect.
+                "HF_HUB_OFFLINE": "1",
+                "HF_DATASETS_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+                "KB_ALLOW_MODEL_DOWNLOAD": "0",
+                "KAGGLEBOT_IO_SCHEMA_SMOKE": "1",
                 "KAGGLEBOT_LOCAL_KERNEL": "1",
                 "KAGGLEBOT_LOCAL_OUTPUT_DIR": str(staged_output_dir),
                 "KAGGLEBOT_OUTPUT_DIR": str(staged_output_dir),

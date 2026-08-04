@@ -288,6 +288,7 @@ def _write_structured_contract_kernel(
     normal_mode: str = "missing_data",
     logit_classes: int = 3,
     training_performed: bool = False,
+    require_smoke_env_aliases: bool = False,
 ) -> None:
     exception_line = f'raise RuntimeError("{contract_exception}")' if contract_exception else ""
     contract_signature = "output_dir=None" if contract_output_arg else ""
@@ -320,6 +321,19 @@ def _write_structured_contract_kernel(
             'output_dir.joinpath("submission.csv").write_text("id,prediction\\n1,0\\n", encoding="utf-8")',
         ],
     }[normal_mode]
+    if require_smoke_env_aliases:
+        normal_lines = [
+            'assert os.environ["KAGGLEBOT_FAST_DEV"] == "1"',
+            'assert os.environ["FAST_DEV"] == "1"',
+            'assert os.environ["KAGGLEBOT_VALIDATION_MAX_SAMPLES"] == "2"',
+            'assert os.environ["VALIDATION_MAX_SAMPLES"] == "2"',
+            'assert os.environ["HF_HUB_OFFLINE"] == "1"',
+            'assert os.environ["HF_DATASETS_OFFLINE"] == "1"',
+            'assert os.environ["TRANSFORMERS_OFFLINE"] == "1"',
+            'assert os.environ["KB_ALLOW_MODEL_DOWNLOAD"] == "0"',
+            'assert os.environ["KAGGLEBOT_IO_SCHEMA_SMOKE"] == "1"',
+            *normal_lines,
+        ]
     normal_body = "\n    ".join(normal_lines)
     report_payload = '"not valid json"' if malformed_report else "json.dumps(report)"
     kernel_path.write_text(
@@ -1366,6 +1380,25 @@ def test_ready_data_accepts_successful_normal_probe(tmp_path: Path) -> None:
     assert result.data_ready is True
     assert result.normal_smoke_returncode == 0
     assert not result.normal_smoke_issues
+
+
+def test_ready_data_normal_probe_receives_prefixed_and_legacy_fast_dev_environment(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=True)
+    _write_structured_contract_kernel(
+        kernel_path,
+        normal_mode="success",
+        require_smoke_env_aliases=True,
+    )
+    monkeypatch.setenv("FAST_DEV", "0")
+    monkeypatch.setenv("VALIDATION_MAX_SAMPLES", "999")
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is True
+    assert result.normal_smoke_returncode == 0
 
 
 @pytest.mark.parametrize(
