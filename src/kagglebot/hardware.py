@@ -192,7 +192,10 @@ def render_hardware_constraints(profile: HardwareProfile, *, compute: str, time_
                 "tracebacks that can retain partial CUDA models, release optimizer/batch references, run garbage "
                 "collection, and empty the CUDA cache.",
                 "- RTX3060-class runtime rule: long local runs are acceptable when they keep a materially stronger "
-                "candidate alive; use watchdogs/checkpoints instead of replacing it with a weak geometry baseline.",
+                "candidate alive; use watchdogs/checkpoints instead of replacing it with a weak geometry baseline. "
+                "Benchmark an early real train/inference unit and extrapolate every fold, epoch, and test row. If the "
+                "projected end-to-end ETA exceeds the hard iteration budget, stop that candidate and finalize the "
+                "strongest already-completed competition-faithful learned baseline so the run still submits.",
             ]
         )
     lines.extend(f"- Note: {note}" for note in profile.notes)

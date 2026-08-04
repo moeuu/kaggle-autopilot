@@ -18,6 +18,8 @@ def test_resolve_explicit_rtx3060_profile() -> None:
     assert "Planning time budget: <= 1440 minutes per kernel iteration" in rendered
     assert "RTX3060-class accuracy-first rule" in rendered
     assert "never tokenizer-truncate expanded image/video tokens" in rendered
+    assert "projected end-to-end ETA exceeds the hard iteration budget" in rendered
+    assert "strongest already-completed competition-faithful learned baseline" in rendered
     assert "clear exception tracebacks" in rendered
 
 
