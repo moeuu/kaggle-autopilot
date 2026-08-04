@@ -84,6 +84,7 @@ _REWARD_AMOUNT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _DEFAULT_RESOURCE_BLOCK_TTL_HOURS = 168.0
+_WATCH_DOWNLOAD_PROGRESS_INTERVAL_SEC = 10 * 60.0
 _RESTARTABLE_PREFLIGHT_PHASES = {
     "bootstrapping",
     "preparing_data",
@@ -1186,6 +1187,10 @@ def _prepare_competition(
             download=True,
             force=False,
             dry_run=config.dry_run,
+            download_progress_callback=_watch_download_progress_callback(
+                phase_context=phase_context,
+                run_id=run_id,
+            ),
         )
     if config.auto_eval_spec:
         update_watch_phase(
@@ -1201,6 +1206,45 @@ def _prepare_competition(
             force=env_flag("KAGGLEBOT_REFRESH_EVALUATION_SPEC", default=False),
         )
         advisor.ensure_spec()
+
+
+def _watch_download_progress_callback(
+    *,
+    phase_context: _WatchPhaseContext,
+    run_id: str,
+) -> Callable[[int, int, str | None], None]:
+    last_reported_at = 0.0
+    last_reported_done = -1
+
+    def report(done_files: int, total_files: int, file_name: str | None) -> None:
+        nonlocal last_reported_at, last_reported_done
+        total = max(1, int(total_files))
+        done = min(max(0, int(done_files)), total)
+        now = time.monotonic()
+        milestone = max(1, total // 100)
+        if (
+            last_reported_done >= 0
+            and done < total
+            and done - last_reported_done < milestone
+            and now - last_reported_at < _WATCH_DOWNLOAD_PROGRESS_INTERVAL_SEC
+        ):
+            return
+        percent = (done / total) * 100.0
+        is_archive = total == 1 and str(file_name or "").lower().endswith(".zip")
+        label = "bulk archive" if is_archive else "competition files"
+        detail = f"downloading {label}: {done}/{total} ({percent:.1f}%)"
+        if file_name:
+            detail += f"; current={Path(file_name).name}"
+        update_watch_phase(
+            phase_context,
+            run_id,
+            "preparing_data",
+            detail=detail,
+        )
+        last_reported_at = now
+        last_reported_done = done
+
+    return report
 
 
 def _watch_training_completion_issue(*, paths: CompetitionPaths, run_id: str) -> str | None:

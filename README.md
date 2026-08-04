@@ -436,11 +436,16 @@ Optional environment knobs:
   - Default preference is earlier stage samples (`Stage1` before `Stage2`) when multiple staged files exist.
   - `KAGGLEBOT_SUBMISSION_STAGE=<int>` or `KAGGLEBOT_SAMPLE_SUBMISSION_STAGE=<int>` forces preferred stage.
 - Large competition download strategy (auto-enabled):
-  - Kagglebot pins the current Kaggle CLI, lists files first, and streams every file independently by default. This avoids a giant all-data ZIP and preserves nested paths.
+  - Kagglebot pins the current Kaggle CLI and lists files first. It streams ordinary datasets file-by-file to preserve
+    nested paths, but automatically switches to the resumable all-data ZIP when a competition has at least 250 files
+    and at least 25 remain. This avoids thousands of authenticated requests and persistent HTTP 429 throttling.
   - Downloads use atomic `.part` files, HTTP Range resume, exact size checks, free-space preflight, and a per-destination process lock.
   - Network disconnects, timeouts, HTTP 429, and HTTP 5xx retry indefinitely by default. Authentication, rules, missing resources, unsafe paths, and insufficient disk fail immediately because waiting cannot repair them.
   - Kaggle `Retry-After` is honored, requests are paced, and authentication is refreshed when a streaming retry opens a new session.
   - `KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST=1` opts back into the legacy all-data ZIP first path.
+  - `KAGGLEBOT_DOWNLOAD_AUTO_BULK=0` disables the high-file-count automatic ZIP switch.
+  - `KAGGLEBOT_DOWNLOAD_BULK_FILE_COUNT_THRESHOLD=<int>` sets its total-file threshold (default `250`).
+  - `KAGGLEBOT_DOWNLOAD_BULK_REMAINING_FILE_COUNT_THRESHOLD=<int>` sets its incomplete-file threshold (default `25`).
   - `KAGGLEBOT_DOWNLOAD_SPLIT_THRESHOLD_BYTES=<int>` controls the split threshold only when streaming is disabled.
   - `KAGGLEBOT_DOWNLOAD_RETRY_ATTEMPTS=<int>` retry attempts for transient failures (`0` = unlimited; default `0`).
   - `KAGGLEBOT_DOWNLOAD_RATE_LIMIT_RETRY_ATTEMPTS=<int>` retry attempts for HTTP 429 (`0` = unlimited; default `0`).

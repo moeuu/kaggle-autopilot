@@ -61,6 +61,9 @@ _DEFAULT_RATE_LIMIT_MAX_BACKOFF_SEC = 900.0
 _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC = 0.25
 _DEFAULT_DOWNLOAD_SINGLE_SHOT_FIRST = False
 _DEFAULT_DOWNLOAD_STREAMING = True
+_DEFAULT_DOWNLOAD_AUTO_BULK = True
+_DEFAULT_DOWNLOAD_BULK_FILE_COUNT_THRESHOLD = 250
+_DEFAULT_DOWNLOAD_BULK_REMAINING_FILE_COUNT_THRESHOLD = 25
 _DEFAULT_DOWNLOAD_PRESERVE_PATHS = True
 _DEFAULT_DOWNLOAD_CHUNK_BYTES = 8 * 1024**2
 _DEFAULT_DOWNLOAD_HTTP_CONNECT_TIMEOUT_SEC = 20.0
@@ -211,6 +214,37 @@ def _download_competition_locked(
             file_name=None,
         )
         return ""
+
+    if (
+        _download_streaming_enabled()
+        and not dry_run
+        and _should_use_bulk_download(total_files=total_files, completed_files=completed_files)
+    ):
+        archive_name = f"{slug}.zip"
+        logger.warning(
+            "competition has %s files (%s incomplete); using resumable bulk archive instead of per-file API requests",
+            total_files,
+            total_files - completed_files,
+        )
+        _emit_download_progress(
+            progress_callback,
+            completed_files=0,
+            total_files=1,
+            file_name=archive_name,
+        )
+        output = _download_competition_all_streaming_with_retry(
+            slug=slug,
+            dest_dir=dest_dir,
+            force=False,
+            quiet=quiet,
+        )
+        _emit_download_progress(
+            progress_callback,
+            completed_files=1,
+            total_files=1,
+            file_name=archive_name,
+        )
+        return output
 
     if _download_streaming_enabled() and not dry_run and files:
         return _download_competition_by_file(
@@ -406,6 +440,36 @@ def _download_single_shot_first_enabled() -> bool:
 
 def _download_streaming_enabled() -> bool:
     return env_flag("KAGGLEBOT_DOWNLOAD_STREAMING", default=_DEFAULT_DOWNLOAD_STREAMING)
+
+
+def _download_auto_bulk_enabled() -> bool:
+    return env_flag("KAGGLEBOT_DOWNLOAD_AUTO_BULK", default=_DEFAULT_DOWNLOAD_AUTO_BULK)
+
+
+def _download_bulk_file_count_threshold() -> int:
+    value = _read_int_env(
+        "KAGGLEBOT_DOWNLOAD_BULK_FILE_COUNT_THRESHOLD",
+        _DEFAULT_DOWNLOAD_BULK_FILE_COUNT_THRESHOLD,
+    )
+    return max(2, value)
+
+
+def _download_bulk_remaining_file_count_threshold() -> int:
+    value = _read_int_env(
+        "KAGGLEBOT_DOWNLOAD_BULK_REMAINING_FILE_COUNT_THRESHOLD",
+        _DEFAULT_DOWNLOAD_BULK_REMAINING_FILE_COUNT_THRESHOLD,
+    )
+    return max(1, value)
+
+
+def _should_use_bulk_download(*, total_files: int, completed_files: int) -> bool:
+    if not _download_auto_bulk_enabled():
+        return False
+    remaining_files = max(0, total_files - completed_files)
+    return (
+        total_files >= _download_bulk_file_count_threshold()
+        and remaining_files >= _download_bulk_remaining_file_count_threshold()
+    )
 
 
 def _download_preserve_paths_enabled() -> bool:

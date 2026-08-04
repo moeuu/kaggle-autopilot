@@ -341,6 +341,42 @@ def test_prepare_competition_reuses_eval_spec_despite_global_force(monkeypatch, 
     assert phase_contexts == [("demo", "local_gpu"), ("demo", "local_gpu")]
 
 
+def test_prepare_competition_reports_throttled_download_progress(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path, auto_eval_spec=False)
+    candidate = _competition("demo")
+    paths = CompetitionPaths(slug="demo", artifacts_dir=config.artifacts_dir, repo_root=config.workdir)
+    phase_updates: list[tuple[str, str]] = []
+    ticks = iter([0.0, 1.0, 2.0, 3.0])
+
+    def fake_bootstrap(**kwargs) -> None:  # noqa: ANN003
+        progress = kwargs["download_progress_callback"]
+        progress(0, 1, "demo.zip")
+        progress(0, 1, "demo.zip")
+        progress(1, 1, "demo.zip")
+
+    monkeypatch.setattr(supervisor, "bootstrap_competition", fake_bootstrap)
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        supervisor,
+        "update_watch_phase",
+        lambda _context, _run_id, phase, **kwargs: phase_updates.append((phase, kwargs.get("detail", ""))),
+    )
+
+    supervisor._prepare_competition(
+        config=config,
+        candidate=candidate,
+        paths=paths,
+        knowledge_paths=supervisor.KnowledgePaths(workdir=tmp_path),
+        run_id="run-1",
+    )
+
+    assert phase_updates == [
+        ("preparing_data", "downloading and profiling competition data"),
+        ("preparing_data", "downloading bulk archive: 0/1 (0.0%); current=demo.zip"),
+        ("preparing_data", "downloading bulk archive: 1/1 (100.0%); current=demo.zip"),
+    ]
+
+
 def test_prepare_competition_resume_reuses_existing_data_without_kaggle_download(
     monkeypatch,
     tmp_path: Path,

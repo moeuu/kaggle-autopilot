@@ -721,6 +721,19 @@ def test_download_streaming_and_preserve_path_flags_use_shared_env_parser(monkey
     assert kaggle_api._download_preserve_paths_enabled() is True
 
 
+def test_auto_bulk_download_policy_uses_file_and_remaining_thresholds(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_AUTO_BULK", "1")
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_BULK_FILE_COUNT_THRESHOLD", "250")
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_BULK_REMAINING_FILE_COUNT_THRESHOLD", "25")
+
+    assert kaggle_api._should_use_bulk_download(total_files=3502, completed_files=3403) is True
+    assert kaggle_api._should_use_bulk_download(total_files=3502, completed_files=3490) is False
+    assert kaggle_api._should_use_bulk_download(total_files=100, completed_files=0) is False
+
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_AUTO_BULK", "0")
+    assert kaggle_api._should_use_bulk_download(total_files=3502, completed_files=0) is False
+
+
 def test_rate_limit_retry_sleep_uses_longer_backoff(monkeypatch) -> None:
     monkeypatch.setattr(kaggle_api, "_download_rate_limit_backoff_sec", lambda: 30.0)
     monkeypatch.setattr(kaggle_api, "_download_rate_limit_max_backoff_sec", lambda: 120.0)
@@ -1022,6 +1035,39 @@ def test_download_competition_streaming_single_shot_avoids_file_listing(monkeypa
 
     assert output == "streamed-all"
     assert progress == [(1, 1, "demo.zip")]
+
+
+def test_download_competition_automatically_uses_bulk_archive_for_many_files(monkeypatch, tmp_path) -> None:
+    files = [kaggle_api._CompetitionFile(name=f"images/{index}.jpg", size_bytes=3) for index in range(300)]
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: True)
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
+    monkeypatch.setattr(kaggle_api, "_list_competition_files_with_sizes", lambda slug, dry_run: files)  # noqa: ARG005
+    monkeypatch.setattr(kaggle_api, "_should_use_bulk_download", lambda **kwargs: True)
+    captured: dict[str, object] = {}
+
+    def fake_bulk(**kwargs) -> str:  # noqa: ANN003
+        captured.update(kwargs)
+        return "streamed-bulk"
+
+    monkeypatch.setattr(kaggle_api, "_download_competition_all_streaming_with_retry", fake_bulk)
+    monkeypatch.setattr(
+        kaggle_api,
+        "_download_competition_by_file",
+        lambda *args, **kwargs: pytest.fail("high-shard competitions must not use per-file API downloads"),
+    )
+    progress: list[tuple[int, int, str | None]] = []
+
+    output = kaggle_api.download_competition(
+        "demo",
+        tmp_path,
+        force=True,
+        quiet=True,
+        progress_callback=lambda done, total, file_name: progress.append((done, total, file_name)),
+    )
+
+    assert output == "streamed-bulk"
+    assert captured["force"] is False
+    assert progress == [(0, 1, "demo.zip"), (1, 1, "demo.zip")]
 
 
 def test_download_competition_streams_large_data_without_kaggle_cli(monkeypatch, tmp_path) -> None:
