@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from kagglebot.artifact_io import same_stem_tabular_artifact_filenames
+import stat
+from pathlib import Path
+
+from kagglebot.artifact_io import copy_artifact_if_needed, same_stem_tabular_artifact_filenames
 
 
 def test_same_stem_tabular_artifact_filenames_expands_submission_suffixes() -> None:
@@ -36,3 +39,21 @@ def test_same_stem_tabular_artifact_filenames_preserves_json_lines_alias_suffixe
 
 def test_same_stem_tabular_artifact_filenames_leaves_non_tabular_name_unchanged() -> None:
     assert same_stem_tabular_artifact_filenames("model.onnx") == ("model.onnx",)
+
+
+def test_copy_artifact_replaces_read_only_destination(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    destination = tmp_path / "mirror" / "kernel.py"
+    source.write_text("new content\n", encoding="utf-8")
+    source.chmod(0o444)
+    destination.parent.mkdir()
+    destination.write_text("old content\n", encoding="utf-8")
+    destination.chmod(0o444)
+
+    assert copy_artifact_if_needed(source=source, destination=destination) == destination
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert stat.S_IMODE(destination.stat().st_mode) & stat.S_IWUSR
+
+    assert copy_artifact_if_needed(source=source, destination=destination) == destination
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert stat.S_IMODE(destination.stat().st_mode) & stat.S_IWUSR

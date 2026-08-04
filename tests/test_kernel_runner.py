@@ -34,6 +34,7 @@ from kagglebot.kernel_package_files import (
 )
 from kagglebot.kernel_runner import (
     KernelRunResult,
+    _inject_local_competition_data_root,
     _local_submission_filename_from_sample,
     _prepare_local_execution_output,
     resolve_kaggle_username,
@@ -4399,6 +4400,98 @@ def test_run_kernel_local_exports_output_dir_env(tmp_path: Path) -> None:
     assert result.metrics_path == expected_output_dir / "metrics.json"
     assert result.submission_path.exists()
     assert result.metrics_path.exists()
+
+
+@pytest.mark.parametrize("explicit_key", [None, "DATA_ROOT", "KAGGLEBOT_DATA_DIR"])
+def test_run_kernel_local_injects_complete_data_root_without_overriding_explicit_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_key: str | None,
+) -> None:
+    data_root_keys = (
+        "KAGGLEBOT_DATA_DIR",
+        "DATA_DIR",
+        "KAGGLE_INPUT_DIR",
+        "DATA_ROOT",
+        "CUHKX_DATA_ROOT",
+    )
+    for key in data_root_keys:
+        monkeypatch.delenv(key, raising=False)
+
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True)
+    source_kernel_dir.joinpath("kernel.py").write_text(
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "from pathlib import Path",
+                "",
+                "out_dir = Path(os.environ['KAGGLEBOT_OUTPUT_DIR'])",
+                "out_dir.mkdir(parents=True, exist_ok=True)",
+                f"keys = {data_root_keys!r}",
+                "payload = {key: os.environ.get(key) for key in keys}",
+                "out_dir.joinpath('data_env.json').write_text(json.dumps(payload), encoding='utf-8')",
+                "out_dir.joinpath('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                "out_dir.joinpath('metrics.json').write_text(",
+                '    \'{"metric":"rmse","offline_value":0.1}\', encoding=\'utf-8\'',
+                ")",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    artifact_data_dir = tmp_path / "demo" / "data"
+    artifact_data_dir.mkdir(parents=True)
+    (artifact_data_dir / "train.csv").write_text("id,target\n1,0\n", encoding="utf-8")
+    (artifact_data_dir / "test.csv").write_text("id\n1\n", encoding="utf-8")
+    (artifact_data_dir / "images").mkdir()
+
+    explicit_root = tmp_path / "explicit-data"
+    if explicit_key is not None:
+        explicit_root.mkdir()
+        monkeypatch.setenv(explicit_key, str(explicit_root))
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id=f"run-data-root-{explicit_key or 'implicit'}",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    observed = json.loads((result.output_dir / "data_env.json").read_text(encoding="utf-8"))
+    if explicit_key is None:
+        assert observed["KAGGLEBOT_DATA_DIR"] == str(artifact_data_dir.resolve())
+    else:
+        assert observed[explicit_key] == str(explicit_root)
+        if explicit_key != "KAGGLEBOT_DATA_DIR":
+            assert observed["KAGGLEBOT_DATA_DIR"] is None
+
+
+@pytest.mark.parametrize("missing", ["train.csv", "test.csv", "assets"])
+def test_local_data_root_injection_rejects_incomplete_artifact_data(tmp_path: Path, missing: str) -> None:
+    data_dir = tmp_path / "demo" / "data"
+    data_dir.mkdir(parents=True)
+    if missing != "train.csv":
+        (data_dir / "train.csv").touch()
+    if missing != "test.csv":
+        (data_dir / "test.csv").touch()
+    if missing != "assets":
+        (data_dir / "images").mkdir()
+    env: dict[str, str] = {}
+
+    assert _inject_local_competition_data_root(env=env, base_dir=tmp_path, slug="demo") is None
+    assert "KAGGLEBOT_DATA_DIR" not in env
 
 
 @pytest.mark.parametrize("suffix", [".jsonl", ".ndjson", ".tsv.gz", ".pkl", ".dta", ".xml", ".orc", ".hdf5"])

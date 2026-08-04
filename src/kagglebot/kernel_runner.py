@@ -147,6 +147,30 @@ _LOCAL_EXECUTION_ENV_SECRET_SEGMENTS = {
     "SECRET",
     "TOKEN",
 }
+_LOCAL_DATA_ROOT_KEYS = (
+    "KAGGLEBOT_DATA_DIR",
+    "DATA_DIR",
+    "KAGGLE_INPUT_DIR",
+    "DATA_ROOT",
+    "CUHKX_DATA_ROOT",
+)
+
+
+def _inject_local_competition_data_root(*, env: dict[str, str], base_dir: Path, slug: str) -> Path | None:
+    """Expose complete local tabular/image assets without overriding an explicit root."""
+    if any(env.get(key) for key in _LOCAL_DATA_ROOT_KEYS):
+        return None
+
+    candidate = (base_dir / slug / "data").resolve()
+    has_tables = (candidate / "train.csv").is_file() and (candidate / "test.csv").is_file()
+    has_assets = (
+        (candidate / "images").is_dir() or (candidate / "images.zip").is_file() or (candidate / f"{slug}.zip").is_file()
+    )
+    if not has_tables or not has_assets:
+        return None
+
+    env["KAGGLEBOT_DATA_DIR"] = str(candidate)
+    return candidate
 
 
 def _local_execution_manifest_matches(manifest: dict[str, object], launch_signature: str) -> bool:
@@ -1174,6 +1198,7 @@ def run_kernel_local(
         env[key] = value
     for key, value in local_model_env.items():
         env[key] = value
+    _inject_local_competition_data_root(env=env, base_dir=base_dir, slug=slug)
     env_notes = _local_kernel_runtime_env.apply_local_runtime_env_defaults(
         env=env,
         accelerator=accelerator,

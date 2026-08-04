@@ -3,7 +3,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
+import stat
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -20,6 +23,27 @@ KERNEL_SUBMIT_INFERENCE_MARKER = "# kagglebot:submit_inference"
 KERNEL_SUBMIT_FIDELITY_MARKER = "# kagglebot:submit_runtime_fidelity"
 KERNEL_SUBMIT_FIDELITY_FINALIZE_MARKER = "# kagglebot:submit_runtime_fidelity_finalize"
 KERNEL_BOOTSTRAP_SCAN_LINES = 512
+
+
+def _atomic_replace_text(path: Path, text: str) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path: Path | None = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(text)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        temporary_path.chmod(mode)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def strip_kernel_bootstrap(lines: list[str]) -> list[str]:
@@ -278,7 +302,9 @@ def ensure_kernel_import_path(kernel_dir: Path) -> None:
         "del _os, _sys, _KROOT, _KWORK\n"
     )
     new_text = compose_kernel_source(source_without_bootstrap, bootstrap, filename=str(kernel_path))
-    kernel_path.write_text(new_text, encoding="utf-8")
+    if new_text == text:
+        return
+    _atomic_replace_text(kernel_path, new_text)
 
 
 def inject_competition_slug_env(kernel_dir: Path, competition_slug: str) -> None:
