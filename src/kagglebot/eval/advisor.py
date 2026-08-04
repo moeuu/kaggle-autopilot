@@ -169,10 +169,12 @@ class EvaluationAdvisor:
             "when available. Read the manifest first and use full attachments as authoritative over trimmed inline "
             "excerpts. Never assume access to a data package that the manifest marks omitted.\n"
             "You MUST choose only from the supported metric/split options listed below.\n"
-            "Return JSON only. No markdown fences. No extra keys.\n"
+            "Return JSON only. No markdown fences. No extra keys. Every string must be valid JSON: escape embedded "
+            'double quotes as \\" or omit literal quote operators from search queries.\n'
             f"{error_block}\n"
             f"Competition slug: {self.slug}\n\n"
             "Supported metrics:\n"
+            "- aurc\n"
             "- auc\n"
             "- logloss\n"
             "- brier_score\n"
@@ -654,14 +656,40 @@ def _parse_json_response(text: str) -> dict[str, object] | None:
     fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, flags=re.DOTALL | re.IGNORECASE)
     if fence_match:
         candidate = fence_match.group(1).strip()
-        return parse_json_object_text(candidate)
+        payload = parse_json_object_text(candidate)
+        if payload is not None:
+            return payload
+        repaired = _parse_without_malformed_search_queries(candidate)
+        if repaired is not None:
+            return repaired
 
     first = raw.find("{")
     last = raw.rfind("}")
     if first == -1 or last == -1 or first >= last:
         return None
     candidate = raw[first : last + 1]
-    return parse_json_object_text(candidate)
+    payload = parse_json_object_text(candidate)
+    if payload is not None:
+        return payload
+    return _parse_without_malformed_search_queries(candidate)
+
+
+def _parse_without_malformed_search_queries(candidate: str) -> dict[str, object] | None:
+    """Salvage the required payload when only the final query array is malformed.
+
+    Search queries are advisory provenance and the schema requires them to be the
+    final field. Dropping that field is safer than guessing how to rewrite model
+    text containing unescaped quote operators; the evaluation spec and cited
+    source summary still pass their normal strict validation.
+    """
+    match = re.search(r'(?m)^(?P<indent>\s*)"search_queries"\s*:', candidate)
+    if match is None:
+        return None
+    prefix = candidate[: match.start()]
+    if not prefix.rstrip().endswith(","):
+        return None
+    repaired = f'{prefix}{match.group("indent")}"search_queries": []\n}}'
+    return parse_json_object_text(repaired)
 
 
 def _advisor_response_schema_text() -> str:
@@ -672,7 +700,8 @@ def _advisor_response_schema_text() -> str:
             "target_medal": TARGET_MEDAL_SCHEMA,
             "target_rank_percentile": "0<float<=1|null",
             "metric_name": (
-                "one of [auc, logloss, brier_score, accuracy, f1, rmse, mae, rmsle, mape, smape, pearson, spearman]"
+                "one of [aurc, auc, logloss, brier_score, accuracy, f1, rmse, mae, rmsle, mape, smape, pearson, "
+                "spearman]"
             ),
             "direction": "maximize|minimize",
             "split_strategy": "kfold|stratified_kfold|group_kfold|timeseries_split",
@@ -776,6 +805,7 @@ def _infer_split_strategy(*, profile: dict[str, object], context_text: str) -> s
 
 def _extract_metric_candidates_from_text(context_text: str) -> list[str]:
     patterns = [
+        (r"\baurc\b|\barea\s+under\s+(?:the\s+)?risk[-\s]?coverage(?:\s+curve)?\b", "aurc"),
         (r"\bauc\b|\broc[-\s_]?auc\b", "auc"),
         (r"\blog\s*loss\b|\bcross[-\s_]?entropy\b", "logloss"),
         (r"\bbrier(?:[-\s_]?score)?(?:[-\s_]?loss)?\b", "brier_score"),

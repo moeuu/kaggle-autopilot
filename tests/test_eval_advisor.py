@@ -59,6 +59,37 @@ def test_validate_advisor_payload_accepts_brier_score_metric() -> None:
     assert spec["direction"] == "minimize"
 
 
+def test_validate_advisor_payload_accepts_aurc_as_minimize_metric() -> None:
+    payload = _valid_payload()
+    payload["evaluation_spec"]["metric_name"] = "aurc"
+    payload["evaluation_spec"]["direction"] = "minimize"
+
+    spec, _, _, issues = validate_advisor_payload(payload)
+
+    assert issues == []
+    assert spec is not None
+    assert spec["metric_name"] == "aurc"
+    assert spec["direction"] == "minimize"
+
+
+def test_parse_json_response_drops_only_malformed_search_queries() -> None:
+    payload = _valid_payload()
+    valid_prefix = json.dumps(
+        {
+            "evaluation_spec": payload["evaluation_spec"],
+            "sources_summary_md": payload["sources_summary_md"],
+        }
+    )[:-1]
+    malformed = f'{valid_prefix},\n"search_queries": ["site:example.com "AURC""]}}'
+
+    parsed = advisor_module._parse_json_response(malformed)
+
+    assert parsed is not None
+    assert parsed["evaluation_spec"] == payload["evaluation_spec"]
+    assert parsed["sources_summary_md"] == payload["sources_summary_md"]
+    assert parsed["search_queries"] == []
+
+
 def test_validate_advisor_payload_schema_rejects_extra_keys() -> None:
     payload = _valid_payload()
     payload["evaluation_spec"]["unsupported"] = True  # type: ignore[index]
@@ -161,6 +192,34 @@ def test_evaluation_advisor_fallback_prefers_context_metric_over_profile_metric(
     spec, source = advisor.ensure_spec()
     assert source == "fallback"
     assert spec["metric_name"] == "auc"
+
+
+def test_evaluation_advisor_fallback_recognizes_aurc_before_generic_accuracy_text(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "accuracy", "task": "classification", "modality": "image"}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("Submissions are ranked on the leaderboard.\n", encoding="utf-8")
+    paths.overview_md_path.write_text(
+        "The official metric is AURC (Area Under the Risk-Coverage Curve); lower is better. "
+        "It measures transcription accuracy and confidence calibration.\n",
+        encoding="utf-8",
+    )
+    paths.submission_format_md_path.write_text("image_file,text,confidence\n", encoding="utf-8")
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        search_capability_check=lambda: False,
+    )
+
+    spec, source = advisor.ensure_spec()
+
+    assert source == "fallback"
+    assert spec["metric_name"] == "aurc"
+    assert spec["direction"] == "minimize"
 
 
 def test_evaluation_advisor_fallback_applies_competition_policy_overrides(tmp_path: Path) -> None:

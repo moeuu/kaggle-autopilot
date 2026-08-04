@@ -29,6 +29,8 @@ from sklearn.model_selection import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from kagglebot.risk_coverage import risk_coverage_auc
+
 Direction = Literal["maximize", "minimize"]
 SplitName = Literal["kfold", "stratified_kfold", "group_kfold", "timeseries_split"]
 ReadinessMethod = Literal["mean_std", "ci_bound"]
@@ -43,6 +45,10 @@ class MetricDefinition:
 
 class MetricRegistry:
     _ALIASES = {
+        "aurc": "aurc",
+        "areaunderriskcoverage": "aurc",
+        "areaunderriskcoveragecurve": "aurc",
+        "riskcoverageauc": "aurc",
         "auc": "auc",
         "aucroc": "auc",
         "rocauc": "auc",
@@ -69,6 +75,7 @@ class MetricRegistry:
     }
 
     _DEFINITIONS = {
+        "aurc": MetricDefinition(canonical_name="aurc", direction="minimize"),
         "auc": MetricDefinition(canonical_name="auc", direction="maximize"),
         "logloss": MetricDefinition(canonical_name="logloss", direction="minimize"),
         "brier_score": MetricDefinition(canonical_name="brier_score", direction="minimize"),
@@ -109,6 +116,8 @@ class MetricRegistry:
         y_true_arr = np.asarray(y_true)
         y_pred_arr = np.asarray(y_pred)
 
+        if metric == "aurc":
+            return risk_coverage_auc(y_true_arr, y_pred_arr)
         if metric == "auc":
             return cls._score_auc(y_true_arr, y_pred_arr)
         if metric == "logloss":

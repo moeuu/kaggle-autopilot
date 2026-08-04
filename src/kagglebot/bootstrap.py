@@ -446,6 +446,7 @@ _TITLE_SCORE_HINT_RE = re.compile(
     re.I,
 )
 _SCORE_DIRECTION_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\baurc\b|area\s+under\s+(?:the\s+)?risk[-\s]?coverage", re.IGNORECASE), "minimize"),
     (re.compile(r"\bbrier\b", re.IGNORECASE), "minimize"),
     (re.compile(r"\blog\s*loss\b|\blogloss\b|\bcross[-\s]?entropy\b", re.IGNORECASE), "minimize"),
     (re.compile(r"\brmse\b|\brmsle\b|\bmae\b|\bmape\b|\bmse\b", re.IGNORECASE), "minimize"),

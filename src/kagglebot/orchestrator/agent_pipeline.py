@@ -4250,6 +4250,7 @@ def _infer_metric_from_context(paths: CompetitionPaths) -> str | None:
     if recall_at_match:
         return f"recall_at_{recall_at_match.group(1)}"
     patterns = [
+        (r"\baurc\b|area\s+under\s+(?:the\s+)?risk[-\s]?coverage(?:\s+curve)?", "aurc"),
         (r"mean[_\\s-]?ia[_\\s-]?weighted[_\\s-]?fmax", "mean_ia_weighted_fmax"),
         (r"mean[_\\s-]?weighted[_\\s-]?fmax", "mean_weighted_fmax"),
         (r"\\bfmax\\b|f-?max", "fmax"),

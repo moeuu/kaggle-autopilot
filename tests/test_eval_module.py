@@ -24,6 +24,14 @@ def test_metric_registry_basic_metrics() -> None:
     assert MetricRegistry.score("brier_score", y_true, y_prob) == pytest.approx(0.025)
 
 
+def test_metric_registry_aurc_orders_risk_by_descending_confidence() -> None:
+    risks = np.array([0.0, 1.0])
+
+    assert MetricRegistry.direction("aurc") == "minimize"
+    assert MetricRegistry.score("aurc", risks, np.array([1.0, 0.5])) == pytest.approx(0.125)
+    assert MetricRegistry.score("aurc", risks, np.array([0.5, 1.0])) == pytest.approx(0.875)
+
+
 def test_metric_registry_regression_and_correlations() -> None:
     y_true = np.array([1.0, 2.0, 3.0, 4.0])
     y_pred = np.array([1.0, 2.0, 3.0, 4.0])

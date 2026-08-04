@@ -24,6 +24,8 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from kagglebot.risk_coverage import risk_coverage_auc
+
 Direction = Literal["minimize", "maximize"]
 
 
@@ -41,6 +43,10 @@ def canonical_metric(metric: str) -> str:
     metric_lower = metric_raw.lower()
     metric_key = re.sub(r"[^a-z0-9]+", "", metric_lower)
     aliases = {
+        "aurc": "aurc",
+        "areaunderriskcoverage": "aurc",
+        "areaunderriskcoveragecurve": "aurc",
+        "riskcoverageauc": "aurc",
         "auc": "auc",
         "aucroc": "auc",
         "rocauc": "auc",
@@ -100,6 +106,7 @@ def infer_direction(metric: str, explicit: str | None = None) -> Direction:
 
     metric_name = canonical_metric(metric)
     if metric_name in {
+        "aurc",
         "rmse",
         "mcrmse",
         "rmsle",
@@ -131,6 +138,8 @@ def infer_direction(metric: str, explicit: str | None = None) -> Direction:
         return "maximize"
 
     metric_lower = metric.lower()
+    if "risk-coverage" in metric_lower or "risk coverage" in metric_lower:
+        return "minimize"
     if any(key in metric_lower for key in ["loss", "error"]):
         return "minimize"
     if any(key in metric_lower for key in ["auc", "accuracy", "f1", "precision", "recall", "ap", "r2", "r_squared"]):
@@ -139,13 +148,15 @@ def infer_direction(metric: str, explicit: str | None = None) -> Direction:
 
 
 def metric_requires_proba(metric: str) -> bool:
-    return canonical_metric(metric) in {"logloss", "auc", "average_precision", "brier_score"}
+    return canonical_metric(metric) in {"aurc", "logloss", "auc", "average_precision", "brier_score"}
 
 
 def compute_metric(metric: str, y_true, y_pred, sample_weight=None) -> float:
     metric_name = canonical_metric(metric)
     if metric_name.startswith("custom:"):
         return _compute_custom_metric(metric_name, y_true, y_pred, sample_weight=sample_weight)
+    if metric_name == "aurc":
+        return risk_coverage_auc(y_true, y_pred, sample_weight=sample_weight)
     if metric_name == "rmse":
         return float(np.sqrt(mean_squared_error(y_true, y_pred, sample_weight=sample_weight)))
     if metric_name == "mcrmse":

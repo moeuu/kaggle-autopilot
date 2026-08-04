@@ -2521,7 +2521,7 @@ def _metric_fit(*, text: str, metric: str | None) -> float:
     metric_key = str(metric).lower()
     if metric_key in normalized:
         return 0.9
-    if any(alias in normalized for alias in ("auc", "logloss", "rmse", "mae", "accuracy", "f1")):
+    if any(alias in normalized for alias in ("aurc", "auc", "logloss", "rmse", "mae", "accuracy", "f1")):
         return 0.7
     return 0.55
 

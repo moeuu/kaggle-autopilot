@@ -97,6 +97,15 @@ def test_auc_roc_alias_direction() -> None:
     assert infer_direction("AUC-ROC") == "maximize"
 
 
+def test_aurc_alias_computes_risk_coverage_area_and_minimizes() -> None:
+    risks = np.array([0.0, 1.0])
+    confidences = np.array([1.0, 0.5])
+
+    assert compute_metric("Area Under Risk Coverage Curve", risks, confidences) == 0.125
+    assert infer_direction("AURC") == "minimize"
+    assert metric_requires_proba("risk-coverage AUC") is True
+
+
 def test_normalize_direction_accepts_only_canonical_directions() -> None:
     assert normalize_direction(" MAXIMIZE ") == "maximize"
     assert normalize_direction("minimize") == "minimize"

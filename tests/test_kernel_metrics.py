@@ -428,6 +428,13 @@ def test_extract_kernel_metric_supports_extended_direct_aliases() -> None:
     assert value == 0.812
 
 
+def test_extract_kernel_metric_supports_direct_aurc() -> None:
+    metric, value = extract_kernel_metric({"aurc": 0.042}, "aurc")
+
+    assert metric == "aurc"
+    assert value == 0.042
+
+
 def test_extract_kernel_metric_prefers_lower_for_extended_loss_metrics() -> None:
     payload = {
         "oof_smape": {

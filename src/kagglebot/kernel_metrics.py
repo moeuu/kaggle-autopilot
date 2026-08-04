@@ -46,6 +46,7 @@ _METRIC_ASSIGNMENT_NAME_SUFFIXES = (
     "rmse",
     "mae",
     "mse",
+    "aurc",
     "auc",
     "qwk",
     "map",
@@ -306,6 +307,7 @@ def extract_kernel_metric(payload: dict[str, object], target_metric: str | None)
 
     def prefers_lower(metric: str) -> bool:
         return canonical_metric(metric) in {
+            "aurc",
             "rmse",
             "rmsle",
             "mae",
@@ -437,6 +439,7 @@ def extract_kernel_metric(payload: dict[str, object], target_metric: str | None)
 
     aliases: dict[str, tuple[str, ...]] = {
         "accuracy": ("accuracy", "acc"),
+        "aurc": ("aurc", "risk_coverage_auc", "area_under_risk_coverage_curve"),
         "auc": ("auc", "rocauc", "roc_auc"),
         "brier_score": ("brier", "brier_score", "brierscore"),
         "concordance_index": ("cindex", "concordance", "concordance_index", "concordanceindex"),

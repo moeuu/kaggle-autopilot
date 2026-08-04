@@ -214,6 +214,7 @@ class TestDirectionInference:
     @pytest.mark.parametrize(
         "metric,expected_direction",
         [
+            ("aurc", "minimize"),
             ("rmse", "minimize"),
             ("mae", "minimize"),
             ("mse", "minimize"),

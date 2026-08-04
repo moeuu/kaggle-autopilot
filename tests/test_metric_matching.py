@@ -15,6 +15,7 @@ def test_metrics_equivalent_accepts_balanced_accuracy_alias() -> None:
 
 
 def test_infer_metric_direction_for_mismatch_uses_known_and_text_hints() -> None:
+    assert infer_metric_direction_for_mismatch("AURC", "maximize") == ("minimize", True)
     assert infer_metric_direction_for_mismatch("RMSE", "maximize") == ("minimize", True)
     assert infer_metric_direction_for_mismatch("custom error", "maximize") == ("minimize", True)
     assert infer_metric_direction_for_mismatch("custom MAP", "minimize") == ("maximize", True)

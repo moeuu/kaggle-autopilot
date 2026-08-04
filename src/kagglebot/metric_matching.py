@@ -42,6 +42,7 @@ def metrics_equivalent(left: str | None, right: str | None) -> bool:
 def infer_metric_direction_for_mismatch(metric: str, fallback_direction: str) -> tuple[str, bool]:
     metric_name = canonical_metric(metric)
     if metric_name in {
+        "aurc",
         "rmse",
         "rmsle",
         "mae",
@@ -71,6 +72,8 @@ def infer_metric_direction_for_mismatch(metric: str, fallback_direction: str) ->
     }:
         return "maximize", True
     metric_lower = metric.lower()
+    if "risk-coverage" in metric_lower or "risk coverage" in metric_lower:
+        return "minimize", True
     if any(key in metric_lower for key in ["loss", "error"]):
         return "minimize", True
     if any(key in metric_lower for key in ["auc", "accuracy", "f1", "precision", "recall", "ap", "r2", "map"]):

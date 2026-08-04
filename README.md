@@ -459,6 +459,8 @@ Optional environment knobs:
   - `KAGGLEBOT_MODEL_PROGRESS_INTERVAL_SEC=<float>` baseline per-model `fit()` tick interval (auto-adjusted by method/data size; default `12`)
   - `KAGGLEBOT_BOOSTING_LOG_EVERY=<int>` boosting eval-log period in iterations (`0` = auto, default)
 - Custom metric hook: use metric string `custom:<module_or_py_path>:<function>`
+- AURC / risk-coverage competitions are recognized as minimize metrics. Shared metric helpers accept one per-sample
+  risk value and confidence value, sort by descending confidence, and integrate cumulative risk over coverage.
 - Vision YOLO routing: if the sample has an image/file id column plus a detection output column such as
   `prediction_string` and YOLO folders exist (`images/train`, `images/test`, `labels/train`), Kagglebot uses a
   detection pipeline instead of tabular models. Formats with `right_place` still get the combined mAP/F1 baseline;

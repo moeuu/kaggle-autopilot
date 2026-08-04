@@ -204,6 +204,10 @@ Useful overrides:
 - `KAGGLEBOT_REFRESH_EVALUATION_SPEC=1` explicitly refreshes the Oracle-generated evaluation specification. The global
   autopilot `--force` flag is reserved for intended side effects and no longer causes this expensive advisor call on
   every watch cycle; valid frozen specifications are reused by default.
+- The evaluation advisor supports AURC as a first-class minimize metric. Advisor output remains strict JSON, but when
+  only the final `search_queries` array contains unescaped quote operators, Kagglebot discards that advisory array and
+  still strictly validates the evaluation specification and cited source summary instead of falling back to an
+  unrelated metric.
 - `KAGGLEBOT_ORACLE_BROWSER_INPUT_TIMEOUT=3600s` and `KAGGLEBOT_ORACLE_BROWSER_TIMEOUT=24h` are the defaults for
   Oracle's browser input and overall browser waits for slower remote Chrome sessions and long GPT Pro answers.
 - `KAGGLEBOT_ORACLE_BROWSER_HEADLESS=0` refuses the headless fallback when ChatGPT/Cloudflare requires a real display.
