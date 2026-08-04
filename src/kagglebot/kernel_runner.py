@@ -1218,6 +1218,15 @@ def run_kernel_local(
     )
     env["KAGGLEBOT_OUTPUT_DIR"] = str(output_dir)
     env["KAGGLEBOT_RESUME"] = "1" if resume_enabled else "0"
+    restored_shared = _local_kernel_resume.restore_local_kernel_shared_state(
+        kernel_stage_dir=kernel_stage_dir,
+        durable_root=durable_resume_root,
+    )
+    if restored_shared:
+        print(
+            "[cyan]kernel local resume[/cyan]: restored same-run shared state into "
+            + ", ".join(str(path) for path in restored_shared)
+        )
     if resume_enabled:
         restored = _local_kernel_resume.restore_local_kernel_checkpoints(
             kernel_stage_dir=kernel_stage_dir,

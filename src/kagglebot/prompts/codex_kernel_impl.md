@@ -59,6 +59,13 @@ Implementation contract for `kernel.py`:
   - Read `train`, `test`, and `sample_submission`
   - Resolve output dirs dynamically; write to `/kaggle/working` only when writable
   - Never print noisy permission warnings for expected unwritable paths during local runs
+  - Put expensive preprocessing, downloads, and chunked inference caches below the local output
+    `cache/` directory. Content-address every cache with the relevant input, model/revision, prompt/config,
+    and cache-schema fingerprints; validate those fingerprints before reuse.
+  - Commit long-running inference results atomically per item or bounded chunk and persist a progress manifest.
+    A process exit after the last inference item must not require repeating the whole inference pass.
+  - Treat restored caches as untrusted hints after a source repair: reject incompatible entries rather than
+    silently interpreting them under changed code.
 - Strict target handling:
   - Infer/match target robustly and assert target column validity
 - Feature alignment helper:

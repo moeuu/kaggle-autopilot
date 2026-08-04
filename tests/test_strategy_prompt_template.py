@@ -49,6 +49,8 @@ def test_prompts_require_fold_intermediate_submissions() -> None:
     assert "runtime test ids" in kernel_template
     assert "never emit a 3-row public placeholder submission" in kernel_template
     assert "completed folds only in memory" in combined
+    assert "A process exit after the last inference item" in kernel_template
+    assert "Content-address every cache" in kernel_template
 
 
 def test_strategy_plan_prompt_includes_quality_gate_checklist() -> None:

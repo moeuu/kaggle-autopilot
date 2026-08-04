@@ -145,6 +145,9 @@ Top1 campaign portfolio override:
 - If `current_metrics_json.campaign.reference_reproduction_report.blocks_novelty` is true, reproduce or diagnose the required reference baseline before proposing novel model changes.
 - If improvement_mode is `validation_redesign`, create group/time/leak-safe/proxy validation candidates first and justify the active validation profile using historical public outcomes.
 - Persist OOF/test predictions and candidate metadata so `candidate_registry.json`, `portfolio_plan.json`, and `blend_report.json` can rank low-correlation candidates and allocate submissions by information value.
+- Persist expensive preprocessing and inference incrementally under a content-addressed local-output `cache/`
+  directory. Validate input/model/prompt/schema fingerprints on reuse and write each item or bounded chunk
+  atomically, so a crash or source repair cannot discard an otherwise completed long inference pass.
 - For long-running multi-fold candidates, persist a valid intermediate candidate at the end of every fold. Save
   completed-fold OOF/test predictions, metadata, `candidate_<candidate>_fold<N>.json`, and a
   `submission_<candidate>_fold<N>.<suffix>` that matches the required submission format when tabular; never leave
