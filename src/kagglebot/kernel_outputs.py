@@ -132,6 +132,7 @@ _COMPOUND_SUBMISSION_ARCHIVE_NAMES = tuple(f"submission{suffix}" for suffix in _
 _DIRECT_SUBMISSION_SUFFIXES = all_submission_output_suffixes()
 _CONFIGURED_SUBMISSION_EXCLUDED_NAMES = {"metrics.json", "plan.json", "submission_manifest.json"}
 _PLAIN_SUBMISSION_DIRECTORY_NAMES = {"sub", "submission", "submissions", "submit"}
+_INTERNAL_DISCOVERY_DIR_NAMES = {"durable_kernel_state"}
 _GENERIC_SUBMISSION_NAME_TOKENS = SAMPLE_OUTPUT_NAME_TOKENS | {
     "forecast",
     "forecasts",
@@ -166,6 +167,7 @@ _GENERIC_SUBMISSION_EXCLUDE_TOKENS = {
     "validation",
 }
 LOCAL_KERNEL_OPTIONAL_ARTIFACTS: tuple[str, ...] = (
+    "local_launch_manifest.json",
     "oof_predictions.csv",
     "split_diagnostics.json",
     "feature_suspects.csv",
@@ -182,6 +184,8 @@ _PLAIN_SUBMISSION_DIRECTORY_EXCLUDED_MEMBER_NAMES = {
 
 def find_submission_file(output_dir: Path) -> Path | None:
     manifest_path = find_submission_manifest(output_dir)
+    if manifest_path is not None and _is_internal_discovery_path(output_dir, manifest_path):
+        manifest_path = None
     if manifest_path is not None:
         manifest_details = resolve_manifest_reference_details(manifest_path)
         submission_path = manifest_details.submission_path
@@ -205,7 +209,7 @@ def find_submission_file(output_dir: Path) -> Path | None:
         if manifest_details.staging_dir is not None or manifest_details.members:
             return manifest_path
     reported_submission = find_authoritative_submission_path(output_dir)
-    if reported_submission is not None:
+    if reported_submission is not None and not _is_internal_discovery_path(output_dir, reported_submission):
         return reported_submission
     preferred = _find_preferred_submission_candidate(output_dir, require_tabular_data_rows=True)
     if preferred is not None:
@@ -250,7 +254,10 @@ def find_output_file(output_dir: Path, filename: str) -> Path | None:
     if directory_suffix in MODEL_DIRECTORY_ARTIFACT_SUFFIXES:
         candidates.extend(_model_directory_output_candidates(output_dir, directory_suffix))
     usable = [
-        path for path in candidates if _expected_output_candidate_is_usable(path, directory_suffix=directory_suffix)
+        path
+        for path in candidates
+        if not _is_internal_discovery_path(output_dir, path)
+        and _expected_output_candidate_is_usable(path, directory_suffix=directory_suffix)
     ]
     if not usable:
         return None
@@ -283,6 +290,8 @@ def _model_directory_output_candidates(output_dir: Path, suffix: str) -> list[Pa
     except OSError:
         return candidates
     for path in paths:
+        if _is_internal_discovery_path(output_dir, path):
+            continue
         if not path.is_dir():
             continue
         if _non_tabular_single_file_suffix(path) != suffix:
@@ -302,6 +311,8 @@ def find_intermediate_submission_file(output_dir: Path) -> Path | None:
     except OSError:
         return None
     for path in paths:
+        if _is_internal_discovery_path(output_dir, path):
+            continue
         if not path.is_file():
             continue
         match = _INTERMEDIATE_SUBMISSION_RE.match(path.name)
@@ -330,6 +341,8 @@ def find_submission_archive_file(output_dir: Path) -> Path | None:
             candidates.append(candidate)
     try:
         for path in output_dir.rglob("*"):
+            if _is_internal_discovery_path(output_dir, path):
+                continue
             if path.name.lower() in names and _archive_candidate_is_usable(path):
                 candidates.append(path)
     except OSError:
@@ -538,6 +551,8 @@ def _find_submission_by_extension(output_dir: Path, *, require_tabular_data_rows
         if _submission_candidate_is_usable(candidate, require_tabular_data_rows=require_tabular_data_rows):
             candidates.append(candidate)
     for path in output_dir.rglob("submission.*"):
+        if _is_internal_discovery_path(output_dir, path):
+            continue
         if not path.is_file() and not path.is_dir():
             continue
         if (
@@ -576,7 +591,8 @@ def _find_preferred_submission_candidate(output_dir: Path, *, require_tabular_da
         candidates.extend(
             path
             for path in iter_named_output_paths(output_dir, preferred_name)
-            if _submission_candidate_is_usable(path, require_tabular_data_rows=require_tabular_data_rows)
+            if not _is_internal_discovery_path(output_dir, path)
+            and _submission_candidate_is_usable(path, require_tabular_data_rows=require_tabular_data_rows)
         )
     except OSError:
         pass
@@ -600,6 +616,8 @@ def _find_generic_submission_by_extension(output_dir: Path, *, require_tabular_d
     except OSError:
         return None
     for path in paths:
+        if _is_internal_discovery_path(output_dir, path):
+            continue
         if not path.is_file() and not path.is_dir():
             continue
         if (
@@ -742,6 +760,8 @@ def _plain_submission_directory_candidates(output_dir: Path) -> list[Path]:
             candidates.append(candidate)
     try:
         for path in output_dir.rglob("*"):
+            if _is_internal_discovery_path(output_dir, path):
+                continue
             if path.name.lower() not in _PLAIN_SUBMISSION_DIRECTORY_NAMES:
                 continue
             if _plain_submission_directory_has_usable_file(path):
@@ -789,6 +809,14 @@ def _preferred_submission_filename() -> str | None:
     if configured_submission_filename_is_template(name):
         return None
     return name
+
+
+def _is_internal_discovery_path(output_dir: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(output_dir)
+    except ValueError:
+        return False
+    return any(part in _INTERNAL_DISCOVERY_DIR_NAMES for part in relative.parts)
 
 
 def _is_local_kernel_optional_artifact_name(name: str) -> bool:

@@ -1769,6 +1769,40 @@ def test_find_submission_file_finds_generic_model_artifact_when_final_missing(tm
         assert find_submission_file(output_dir) == artifact, name
 
 
+def test_find_submission_file_ignores_durable_kernel_state_model_cache(tmp_path: Path) -> None:
+    output_dir = tmp_path / "iter-1"
+    launch_manifest = output_dir / "output" / "launch-signature" / "local_launch_manifest.json"
+    launch_manifest.parent.mkdir(parents=True)
+    launch_manifest.write_text('{"signature": "abc"}\n', encoding="utf-8")
+    cached_model = (
+        output_dir
+        / "durable_kernel_state"
+        / "shared"
+        / "models"
+        / "models--Qwen--Qwen2.5-VL-7B-Instruct"
+        / "snapshots"
+        / "revision"
+        / "model-00004-of-00005.safetensors"
+    )
+    cached_model.parent.mkdir(parents=True)
+    cached_model.write_bytes(b"cached-model-shard")
+
+    assert find_submission_file(output_dir) is None
+
+    submission = output_dir / "output" / "adapter_model.safetensors"
+    submission.write_bytes(b"actual-submission")
+    assert find_submission_file(output_dir) == submission
+
+
+def test_find_output_file_ignores_durable_kernel_state_cache(tmp_path: Path) -> None:
+    output_dir = tmp_path / "iter-1"
+    cached = output_dir / "durable_kernel_state" / "shared" / "kernel_output" / "cache" / "metrics.json"
+    cached.parent.mkdir(parents=True)
+    cached.write_text('{"score": 0.1}\n', encoding="utf-8")
+
+    assert find_output_file(output_dir, "metrics.json") is None
+
+
 def test_find_submission_file_ignores_lonely_tensorflow_checkpoint_index(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     nested = output_dir / "nested"
