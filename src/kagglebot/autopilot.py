@@ -1381,16 +1381,25 @@ def _recover_pending_oracle_workflow(*, config: AutopilotConfig, run_id: str) ->
         f"{workflow_id} ({pending.get('status')}) before planning or kernel execution"
     )
     if workflow_kind == "kernel_fix":
-        if _complete_obsolete_kernel_source_fix_recovery(
-            config=config,
-            run_id=run_id,
-            workflow_id=workflow_id,
-            payload=payload,
-        ) or _complete_obsolete_kernel_metrics_fix_recovery(
-            config=config,
-            run_id=run_id,
-            workflow_id=workflow_id,
-            payload=payload,
+        if (
+            _complete_obsolete_kernel_source_fix_recovery(
+                config=config,
+                run_id=run_id,
+                workflow_id=workflow_id,
+                payload=payload,
+            )
+            or _complete_obsolete_kernel_runtime_source_fix_recovery(
+                config=config,
+                run_id=run_id,
+                workflow_id=workflow_id,
+                payload=payload,
+            )
+            or _complete_obsolete_kernel_metrics_fix_recovery(
+                config=config,
+                run_id=run_id,
+                workflow_id=workflow_id,
+                payload=payload,
+            )
         ):
             return
         iteration = _workflow_required_int(payload, "iteration", workflow_id=workflow_id)
@@ -1528,6 +1537,47 @@ def _complete_obsolete_kernel_source_fix_recovery(
     print(
         "[yellow]resume[/yellow]: interrupted kernel source fix is obsolete; "
         "the current deliverable contract already passes, so kernel execution can resume"
+    )
+    return True
+
+
+def _complete_obsolete_kernel_runtime_source_fix_recovery(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    workflow_id: str,
+    payload: dict[str, object],
+) -> bool:
+    """Skip an interrupted runtime repair after the failed kernel source changed."""
+    if str(payload.get("failure_stage") or "").strip().lower() != "kernel_runtime":
+        return False
+    iteration = _workflow_optional_int(payload.get("iteration"))
+    if iteration is None:
+        return False
+    failed_sha = _workflow_optional_str(payload.get("failed_kernel_source_sha256"))
+    if failed_sha is None:
+        iter_dir = config.paths.iter_dir(run_id, iteration)
+        manifests = sorted(
+            iter_dir.glob("output/**/local_launch_manifest.json"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for manifest_path in manifests:
+            manifest = _json_utils.load_json_object_or_empty(manifest_path)
+            failed_sha = _workflow_optional_str(manifest.get("kernel_sha256"))
+            if failed_sha is not None:
+                break
+    current_sha = _kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir)
+    if failed_sha is None or current_sha is None or failed_sha == current_sha:
+        return False
+    checkpoint = _oracle_workflow_state.OracleWorkflowCheckpoint(
+        path=_oracle_workflow_state.oracle_workflow_state_path(config.paths.run_dir(run_id)),
+        workflow_id=workflow_id,
+    )
+    checkpoint.mark_completed()
+    print(
+        "[yellow]resume[/yellow]: interrupted kernel runtime fix is obsolete; "
+        "kernel.py changed after the failed launch, so the new source will run before any further repair"
     )
     return True
 
@@ -5109,6 +5159,7 @@ def _run_kernel_fix(
         "prompt_prefix": prompt_prefix,
         "max_codex_passes": max_codex_passes,
         "failure_stage": failure_stage,
+        "failed_kernel_source_sha256": _kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir),
     }
     with _oracle_workflow_state.oracle_workflow_checkpoint(
         run_dir=config.paths.run_dir(run_id),

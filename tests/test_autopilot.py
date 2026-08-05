@@ -646,6 +646,39 @@ def test_recovery_skips_obsolete_nullable_metric_fix(monkeypatch, tmp_path: Path
     assert state["status"] == "completed"
 
 
+def test_recovery_skips_runtime_fix_when_failed_kernel_source_was_replaced(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    config.paths.kernel_source_dir.mkdir(parents=True, exist_ok=True)
+    (config.paths.kernel_source_dir / "kernel.py").write_text("print('fixed')\n", encoding="utf-8")
+    checkpoint = autopilot_mod._oracle_workflow_state.begin_oracle_workflow(
+        run_dir=config.paths.run_dir(run_id),
+        workflow_id="kernel-fix-iter-1-attempt-1",
+        workflow_kind="kernel_fix",
+        recovery_payload={
+            "iteration": 1,
+            "attempt": 1,
+            "failure_stage": "kernel_runtime",
+            "error_message": "RuntimeError: old kernel failed",
+            "failed_kernel_source_sha256": "0" * 64,
+        },
+    )
+    checkpoint.mark_oracle_complete()
+    monkeypatch.setattr(
+        "kagglebot.autopilot._run_kernel_fix",
+        lambda **kwargs: pytest.fail("obsolete runtime fix must not run"),
+    )
+
+    autopilot_mod._recover_pending_oracle_workflow(config=config, run_id=run_id)
+
+    state = json.loads(
+        autopilot_mod._oracle_workflow_state.oracle_workflow_state_path(config.paths.run_dir(run_id)).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["status"] == "completed"
+
+
 def test_kernel_fix_checkpoint_records_source_preflight_stage(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     run_id = config.run_id or "run-1"
