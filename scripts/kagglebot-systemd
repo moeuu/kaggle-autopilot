@@ -19,6 +19,26 @@ current_link="${runtime_root}/current"
 uv_link="${runtime_root}/uv"
 user_unit_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 command_name="${1:-install}"
+enable_oracle_update=0
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable-oracle-update) enable_oracle_update=1 ;;
+    *)
+      printf 'Unknown option: %s\n' "$1" >&2
+      printf 'Usage: %s {install|start|stop|restart|status|uninstall} [--enable-oracle-update]\n' "$0" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [[ "${enable_oracle_update}" == 1 && "${command_name}" != install ]]; then
+  printf '%s\n' '--enable-oracle-update is only valid with install.' >&2
+  exit 2
+fi
 
 require_systemd_user() {
   command -v systemctl >/dev/null 2>&1 || {
@@ -54,8 +74,13 @@ install_services() {
   rm -f "${user_unit_dir}/kagglebot-discord-notifier.service"
 
   systemctl --user daemon-reload
-  systemctl --user enable "${service_names[@]}" "${timer_names[@]}"
-  systemctl --user start "${timer_names[@]}"
+  systemctl --user enable "${service_names[@]}"
+  if [[ "${enable_oracle_update}" == 1 ]]; then
+    systemctl --user enable --now "${timer_names[@]}"
+  else
+    systemctl --user disable --now "${timer_names[@]}" 2>/dev/null || true
+    printf 'Oracle auto-update timer is disabled; opt in with install --enable-oracle-update.\n'
+  fi
   systemctl --user restart "${service_names[@]}"
   printf 'Installed from %s\n' "${repo_root}"
   status_services
@@ -64,26 +89,39 @@ install_services() {
 start_services() {
   require_systemd_user
   systemctl --user daemon-reload
-  systemctl --user start "${service_names[@]}" "${timer_names[@]}"
+  systemctl --user start "${service_names[@]}"
+  if systemctl --user is-enabled --quiet "${timer_names[0]}"; then
+    systemctl --user start "${timer_names[@]}"
+  fi
   status_services
 }
 
 stop_services() {
   require_systemd_user
-  systemctl --user stop "${service_names[@]}" "${timer_names[@]}"
+  systemctl --user stop "${service_names[@]}"
+  if systemctl --user is-enabled --quiet "${timer_names[0]}"; then
+    systemctl --user stop "${timer_names[@]}"
+  fi
 }
 
 restart_services() {
   require_systemd_user
   systemctl --user daemon-reload
-  systemctl --user restart "${timer_names[@]}"
+  if systemctl --user is-enabled --quiet "${timer_names[0]}"; then
+    systemctl --user restart "${timer_names[@]}"
+  fi
   systemctl --user restart "${service_names[@]}"
   status_services
 }
 
 status_services() {
   require_systemd_user
-  systemctl --user status "${service_names[@]}" "${timer_names[@]}" --no-pager
+  systemctl --user status "${service_names[@]}" --no-pager
+  if systemctl --user is-enabled --quiet "${timer_names[0]}"; then
+    systemctl --user status "${timer_names[@]}" --no-pager
+  else
+    printf 'Optional timer disabled: %s\n' "${timer_names[0]}"
+  fi
 }
 
 uninstall_services() {
@@ -107,7 +145,7 @@ case "${command_name}" in
   status) status_services ;;
   uninstall) uninstall_services ;;
   *)
-    printf 'Usage: %s {install|start|stop|restart|status|uninstall}\n' "$0" >&2
+    printf 'Usage: %s {install|start|stop|restart|status|uninstall} [--enable-oracle-update]\n' "$0" >&2
     exit 2
     ;;
 esac

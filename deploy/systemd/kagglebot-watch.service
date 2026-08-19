@@ -1,8 +1,8 @@
 [Unit]
 Description=Kagglebot continuous competition autopilot
 Documentation=file:%h/.local/share/kagglebot-autopilot/current/docs/autopilot.md
-After=network-online.target kagglebot-oracle-update.service
-Wants=network-online.target kagglebot-oracle-update.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple

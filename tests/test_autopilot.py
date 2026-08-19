@@ -6267,7 +6267,7 @@ def test_autopilot_skips_submit_when_kaggle_credentials_missing(monkeypatch, tmp
             exit_code=1,
             output=(
                 "OSError: Could not find kaggle.json. Make sure it's located in "
-                "/home/moeu/.config/kaggle. Or use the environment method."
+                "/home/example/.config/kaggle. Or use the environment method."
             ),
         )
 

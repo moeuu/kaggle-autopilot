@@ -46,8 +46,8 @@ app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI 
 knowledge_app = typer.Typer(add_completion=False, help="Knowledge base commands.")
 app.add_typer(knowledge_app, name="knowledge")
 
-DEFAULT_ARTIFACTS_DIR = Path("/data") / (os.environ.get("USER") or "user") / "kaggle-autopilot-artifacts"
-FALLBACK_ARTIFACTS_DIR = Path("artifacts")
+ARTIFACTS_DIR_ENV = "KAGGLEBOT_ARTIFACTS_DIR"
+DEFAULT_ARTIFACTS_DIR = Path("artifacts")
 DEFAULT_KAGGLE_GPU_MIN_QUOTA_HOURS = 15.0
 
 
@@ -82,16 +82,10 @@ def _normalize_self_improvement_interval(value: float | None) -> float | None:
 
 
 def _preferred_artifacts_dir() -> Path:
-    preferred = DEFAULT_ARTIFACTS_DIR
-    try:
-        if preferred.exists():
-            if os.access(preferred, os.W_OK | os.X_OK):
-                return preferred
-        elif preferred.parent.exists() and os.access(preferred.parent, os.W_OK | os.X_OK):
-            return preferred
-    except OSError:
-        pass
-    return FALLBACK_ARTIFACTS_DIR
+    configured = os.environ.get(ARTIFACTS_DIR_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return DEFAULT_ARTIFACTS_DIR
 
 
 @app.callback()
@@ -100,7 +94,7 @@ def main(
     artifacts_dir: Path | None = typer.Option(
         None,
         "--artifacts-dir",
-        help="Artifacts directory. Defaults to /data/<user> when writable, otherwise ./artifacts.",
+        help="Artifacts directory. Defaults to ./artifacts; override with KAGGLEBOT_ARTIFACTS_DIR.",
     ),
     workdir: Path = typer.Option(Path("."), "--workdir", help="Working directory."),
     dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help="Skip external side effects."),

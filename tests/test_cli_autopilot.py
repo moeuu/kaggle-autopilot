@@ -5,10 +5,21 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from kagglebot.cli import app
+from kagglebot.cli import _preferred_artifacts_dir, app
 from kagglebot.exceptions import SubmitAbortedError
 from kagglebot.paths import CompetitionPaths
 from kagglebot.submission_service import SubmissionConfig
+
+
+def test_default_artifacts_dir_is_portable(monkeypatch) -> None:
+    monkeypatch.delenv("KAGGLEBOT_ARTIFACTS_DIR", raising=False)
+    assert _preferred_artifacts_dir() == Path("artifacts")
+
+
+def test_artifacts_dir_can_be_configured_outside_the_repository(monkeypatch, tmp_path: Path) -> None:
+    configured = tmp_path / "kagglebot-artifacts"
+    monkeypatch.setenv("KAGGLEBOT_ARTIFACTS_DIR", str(configured))
+    assert _preferred_artifacts_dir() == configured
 
 
 def test_autopilot_uses_preferred_artifacts_dir_by_default(monkeypatch, tmp_path: Path) -> None:

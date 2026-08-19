@@ -24,16 +24,20 @@ For a persistent user-level autopilot directly backed by this clone:
 ```
 
 The installer runs `uv sync --frozen`, registers the versioned units from `deploy/systemd/`, and enables the continuous
-`watch` loop and Oracle auto-update timer. The timer checks npm every 15 minutes, installs the latest
-`@steipete/oracle` release with the dedicated Node 24 runtime, and defers safely while an Oracle session is active. It
-does not copy or fork the autopilot implementation: systemd runs `uv run kagglebot --force watch` from this checkout.
-Agent model settings continue to come only from `[tool.kagglebot.agent]` in `pyproject.toml`.
+`watch` loop. Oracle CLI auto-update is intentionally disabled by default. Opt in explicitly with
+`./scripts/kagglebot-systemd install --enable-oracle-update`; its timer checks npm every 15 minutes, installs the latest
+`@steipete/oracle` release with the dedicated Node 24 runtime, and defers safely while an Oracle session is active. The
+installer does not copy or fork the autopilot implementation: systemd runs `uv run kagglebot --force watch` from this
+checkout. Agent model settings continue to come only from `[tool.kagglebot.agent]` in `pyproject.toml`.
 
 Optional machine-specific watch settings can be copied from `deploy/systemd/watch.env.example` to
 `~/.config/kagglebot-autopilot/watch.env`. Generic Event API settings can be copied from
 `deploy/systemd/events.env.example` to `~/.config/kagglebot-autopilot/events.env`; never commit either file. Manage the services with
 `./scripts/kagglebot-systemd start|stop|restart|status|uninstall`. Use `loginctl enable-linger "$USER"` when the user
 services must start at boot before the first login.
+
+Artifacts default to `./artifacts`. Set `KAGGLEBOT_ARTIFACTS_DIR` in `watch.env` when a machine should use a dedicated
+data volume; absolute host paths belong in that untracked configuration file, not in repository code.
 
 ## Quick Start (Minimal Args)
 

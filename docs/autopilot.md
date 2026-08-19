@@ -51,16 +51,19 @@ Install and immediately start the repository-managed user services from any clon
 The installer creates a stable symlink to the current clone and registers the unit files in `deploy/systemd/`.
 `kagglebot-watch.service` directly runs `uv run kagglebot --force watch`; there is no separate service-specific
 autopilot implementation. Pulling repository code therefore updates the implementation used on the next service
-restart. The installer also enables `kagglebot-oracle-update.timer`, which checks npm every 15 minutes and before
-`watch` starts. It installs the latest `@steipete/oracle` release through the dedicated Node 24 npm prefix. An update is
-deferred while an Oracle or Oracle MCP process is active, then retried on the next timer cycle. Set
-`KAGGLEBOT_ORACLE_AUTO_UPDATE=0` in `watch.env` to disable it. The primary, Oracle, and Oracle-follow-up model identities
-remain centralized in `[tool.kagglebot.agent]` in `pyproject.toml`, not duplicated in the systemd unit.
+restart. Oracle CLI updating is independent from `watch` and disabled by default. Enable it explicitly with
+`./scripts/kagglebot-systemd install --enable-oracle-update`; the timer then checks npm every 15 minutes and installs the
+latest `@steipete/oracle` release through the dedicated Node 24 npm prefix. An update is deferred while an Oracle or
+Oracle MCP process is active, then retried on the next timer cycle. The primary, Oracle, and Oracle-follow-up model
+identities remain centralized in `[tool.kagglebot.agent]` in `pyproject.toml`, not duplicated in the systemd unit.
 
 Use `./scripts/kagglebot-systemd start|stop|restart|status|uninstall` for lifecycle management. Optional per-machine
 settings belong in `~/.config/kagglebot-autopilot/watch.env`; start from `deploy/systemd/watch.env.example`. Keep API
 tokens out of the repository. Enabling user lingering with `loginctl enable-linger "$USER"` makes enabled user services
 start at boot without waiting for an interactive login.
+
+Artifacts default to `./artifacts`. Set `KAGGLEBOT_ARTIFACTS_DIR` in `watch.env` when a machine should use a dedicated
+data volume; absolute host paths belong in that untracked configuration file, not in repository code.
 
 ## Generic Event Notifications
 

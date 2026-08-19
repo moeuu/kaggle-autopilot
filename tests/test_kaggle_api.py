@@ -595,18 +595,18 @@ def test_leaderboard_rank_for_score_overrides_wrong_caller_direction(monkeypatch
 
 def test_kernel_exists_matches_url_refs(monkeypatch) -> None:
     def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
-        return "ref,title\nhttps://www.kaggle.com/code/MoeUuu/sample-kernel,Sample\n"
+        return "ref,title\nhttps://www.kaggle.com/code/example-user/sample-kernel,Sample\n"
 
     monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
-    assert kaggle_api.kernel_exists("moeuuu/sample-kernel") is True
+    assert kaggle_api.kernel_exists("example-user/sample-kernel") is True
 
 
 def test_kernel_exists_matches_plain_refs(monkeypatch) -> None:
     def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
-        return "ref,title\nmoeuuu/another-kernel,Another\n"
+        return "ref,title\nexample-user/another-kernel,Another\n"
 
     monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
-    assert kaggle_api.kernel_exists("moeuuu/another-kernel") is True
+    assert kaggle_api.kernel_exists("example-user/another-kernel") is True
 
 
 def test_parse_competition_files_csv_with_next_page_token() -> None:
