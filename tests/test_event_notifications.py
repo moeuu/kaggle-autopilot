@@ -6,21 +6,22 @@ from pathlib import Path
 
 from pytest import MonkeyPatch
 
-import kagglebot.discord_notifications as discord_notifications
-from kagglebot.discord_notifications import (
+import kagglebot.event_notifications as event_notifications
+from kagglebot.event_notifications import (
     DELIVERED_LIFECYCLE_KEYS,
     DELIVERY_RECEIPTS_FILENAME,
     LEDGER_CURSOR_INITIALIZED_KEY,
     LEDGER_OFFSET_KEY,
-    DiscordEventConfig,
-    DiscordEventNotifier,
+    HttpEventSink,
+    HttpEventSinkConfig,
     _read_json_object,
     build_autopilot_status_payload,
-    run_discord_notifier_once,
+    dispatch_events_once,
+    event_sink_from_env,
 )
 
 
-class RecordingNotifier(DiscordEventNotifier):
+class RecordingSink(HttpEventSink):
     def __init__(self) -> None:
         super().__init__(None)
         self.events: list[dict[str, object]] = []
@@ -34,7 +35,7 @@ class RecordingNotifier(DiscordEventNotifier):
         return True
 
 
-class FailingOnceNotifier(RecordingNotifier):
+class FailingOnceSink(RecordingSink):
     def __init__(self) -> None:
         super().__init__()
         self.failed = False
@@ -61,20 +62,44 @@ class UrlResponse:
         return self.raw
 
 
-def test_discord_event_notifier_requires_at_least_one_matched_route(monkeypatch: MonkeyPatch) -> None:
+def test_event_sink_requires_at_least_one_matched_route(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(
-        discord_notifications.urllib.request,
+        event_notifications.urllib.request,
         "urlopen",
         lambda *_args, **_kwargs: UrlResponse({"matched_routes": 0}),
     )
-    notifier = DiscordEventNotifier(DiscordEventConfig(api_url="https://events.invalid/api", api_token="test-token"))
+    sink = HttpEventSink(HttpEventSinkConfig(api_url="https://events.invalid/api", api_token="test-token"))
 
-    assert not notifier.emit(
+    assert not sink.emit(
         event_type="autopilot.status",
         severity="info",
         dedupe_key="test-event",
         payload={},
     )
+
+
+def test_event_sink_uses_generic_env_and_omits_optional_account(monkeypatch: MonkeyPatch) -> None:
+    requests = []
+
+    def accept(request, **_kwargs):  # type: ignore[no-untyped-def]
+        requests.append(request)
+        return UrlResponse({"matched_routes": 1, "event": {"id": "server-1", "status": "queued"}})
+
+    monkeypatch.setenv("KAGGLEBOT_EVENT_SINK_URL", "https://events.invalid/api")
+    monkeypatch.setenv("KAGGLEBOT_EVENT_SINK_TOKEN", "test-token")
+    monkeypatch.setattr(event_notifications.urllib.request, "urlopen", accept)
+
+    receipt = event_sink_from_env().emit(
+        event_type="autopilot.status",
+        severity="info",
+        dedupe_key="test-event",
+        payload={},
+    )
+
+    body = json.loads(requests[0].data)
+    assert "account" not in body
+    assert receipt.response_event_id == "server-1"
+    assert receipt.response_status == "queued"
 
 
 def test_lifecycle_cursor_advances_only_after_durable_api_receipt(
@@ -85,7 +110,7 @@ def test_lifecycle_cursor_advances_only_after_durable_api_receipt(
     watch_dir = artifacts / "_watch"
     watch_dir.mkdir(parents=True)
     (watch_dir / "state.json").write_text(json.dumps({"last_status": "failed"}), encoding="utf-8")
-    (watch_dir / "discord_notifier_state.json").write_text(
+    (watch_dir / "event_delivery_state.json").write_text(
         json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0}),
         encoding="utf-8",
     )
@@ -104,18 +129,18 @@ def test_lifecycle_cursor_advances_only_after_durable_api_receipt(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        discord_notifications.urllib.request,
+        event_notifications.urllib.request,
         "urlopen",
         lambda *_args, **_kwargs: UrlResponse(
             {"matched_routes": 1, "event_id": "server-event-1", "delivery_status": "queued"}
         ),
     )
-    notifier = DiscordEventNotifier(DiscordEventConfig(api_url="https://events.invalid/api", api_token="test-token"))
+    sink = HttpEventSink(HttpEventSinkConfig(api_url="https://events.invalid/api", api_token="test-token"))
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=datetime(2026, 7, 17, 6, 5, 57, tzinfo=UTC),
     )
 
@@ -130,7 +155,7 @@ def test_lifecycle_cursor_advances_only_after_durable_api_receipt(
     assert lifecycle["matched_routes"] == 1
     assert lifecycle["ledger_offset"] == 0
     assert lifecycle["ledger_next_offset"] == ledger_path.stat().st_size
-    assert _read_json_object(watch_dir / "discord_notifier_state.json")[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
+    assert _read_json_object(watch_dir / "event_delivery_state.json")[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
 
 
 def test_read_json_object_returns_empty_for_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
@@ -449,12 +474,12 @@ def test_build_autopilot_status_payload_prefers_active_recovery_over_failed_run_
     assert payload["status"] == "running"
     assert payload["run_record_status"] == "submit_failed"
     assert payload["phase"] == "gpt_submit_autofix_thinking"
-    assert discord_notifications._event_type_for_snapshot(payload) == "autopilot.status"
-    assert discord_notifications._severity_for_snapshot(payload) == "info"
+    assert event_notifications._event_type_for_snapshot(payload) == "autopilot.status"
+    assert event_notifications._severity_for_snapshot(payload) == "info"
     assert "gpt submit autofix thinking" in payload["message"]
 
 
-def test_discord_notifier_replaces_transient_failure_with_active_autofix_status(tmp_path: Path) -> None:
+def test_event_dispatcher_replaces_transient_failure_with_active_autofix_status(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"
     run_dir = artifacts / "demo" / "runs" / "run-1"
@@ -476,17 +501,17 @@ def test_discord_notifier_replaces_transient_failure_with_active_autofix_status(
         json.dumps({"status": "submit_failed", "config": {"max_iterations": 3}}),
         encoding="utf-8",
     )
-    (watch_dir / "discord_notifier_state.json").write_text(
+    (watch_dir / "event_delivery_state.json").write_text(
         json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0, "last_run_id": "run-1"}),
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
     first = datetime(2026, 4, 23, 0, 0, tzinfo=UTC)
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first,
     )
 
@@ -502,50 +527,50 @@ def test_discord_notifier_replaces_transient_failure_with_active_autofix_status(
         ),
         encoding="utf-8",
     )
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first + timedelta(minutes=1),
     )
 
-    assert [event["event_type"] for event in notifier.events] == ["autopilot.failed", "autopilot.status"]
-    assert [event["severity"] for event in notifier.events] == ["error", "info"]
-    assert notifier.events[-1]["payload"]["status"] == "running"
-    assert notifier.events[-1]["payload"]["phase"] == "gpt_submit_autofix_thinking"
-    assert notifier.events[-1]["payload"]["discord_update_key"] == ("kaggle-autopilot:lab_rdp:local_gpu:run:run-1")
+    assert [event["event_type"] for event in sink.events] == ["autopilot.failed", "autopilot.status"]
+    assert [event["severity"] for event in sink.events] == ["error", "info"]
+    assert sink.events[-1]["payload"]["status"] == "running"
+    assert sink.events[-1]["payload"]["phase"] == "gpt_submit_autofix_thinking"
+    assert sink.events[-1]["payload"]["coalesce_key"] == ("kaggle-autopilot:local_gpu:run:run-1")
 
 
-def test_run_discord_notifier_once_suppresses_unchanged_idle_snapshot_even_after_heartbeat(tmp_path: Path) -> None:
+def test_dispatch_events_once_suppresses_unchanged_idle_snapshot_even_after_heartbeat(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     (artifacts / "_watch").mkdir(parents=True)
     (artifacts / "_watch" / "state.json").write_text(json.dumps({"last_status": "idle"}), encoding="utf-8")
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
     first = datetime(2026, 4, 23, 0, 0, tzinfo=UTC)
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first,
     )
-    assert not run_discord_notifier_once(
+    assert not dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first + timedelta(minutes=5),
     )
-    assert not run_discord_notifier_once(
+    assert not dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first + timedelta(minutes=31),
     )
-    assert len(notifier.events) == 1
-    assert notifier.events[0]["payload"]["discord_update_key"] == "kaggle-autopilot:lab_rdp:local_gpu:idle"
+    assert len(sink.events) == 1
+    assert sink.events[0]["payload"]["coalesce_key"] == "kaggle-autopilot:local_gpu:idle"
 
 
-def test_discord_update_key_changes_between_idle_and_active_competition(tmp_path: Path) -> None:
+def test_coalesce_key_changes_between_idle_and_active_competition(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"
     run_dir = artifacts / "demo" / "runs" / "run-1"
@@ -576,11 +601,25 @@ def test_discord_update_key_changes_between_idle_and_active_competition(tmp_path
 
     assert idle_payload["phase"] == "idle"
     assert active_payload["competition"] == "demo"
-    assert idle_payload["discord_update_key"] == "kaggle-autopilot:lab_rdp:local_gpu:idle"
-    assert active_payload["discord_update_key"] == "kaggle-autopilot:lab_rdp:local_gpu:run:run-1"
+    assert idle_payload["coalesce_key"] == "kaggle-autopilot:local_gpu:idle"
+    assert active_payload["coalesce_key"] == "kaggle-autopilot:local_gpu:run:run-1"
+    assert active_payload["lease_expires_at"] == "2026-04-23T01:05:00+00:00"
+    for private_key in ("host", "artifact_root", "run_dir"):
+        assert private_key not in idle_payload
+        assert private_key not in active_payload
 
 
-def test_run_discord_notifier_once_reemits_active_snapshot_after_heartbeat(tmp_path: Path) -> None:
+def test_installation_id_is_opt_in(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KAGGLEBOT_INSTALLATION_ID", "worker-01")
+    payload = build_autopilot_status_payload(
+        artifacts_dir=tmp_path / "artifacts",
+        now=datetime(2026, 4, 23, tzinfo=UTC),
+    )
+
+    assert payload["coalesce_key"] == "kaggle-autopilot:worker-01:local_gpu:idle"
+
+
+def test_dispatch_events_once_reemits_active_snapshot_after_heartbeat(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     run_dir = artifacts / "demo" / "runs" / "run-1"
     (artifacts / "_watch").mkdir(parents=True)
@@ -593,31 +632,31 @@ def test_run_discord_notifier_once_reemits_active_snapshot_after_heartbeat(tmp_p
         json.dumps({"run_id": "run-1", "slug": "demo", "status": "running", "config": {"max_iterations": 3}}),
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
     first = datetime(2026, 4, 23, 0, 0, tzinfo=UTC)
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first,
     )
-    assert not run_discord_notifier_once(
+    assert not dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first + timedelta(minutes=5),
     )
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first + timedelta(minutes=31),
     )
-    assert len(notifier.events) == 2
+    assert len(sink.events) == 2
 
 
-def test_run_discord_notifier_once_marks_new_active_run_as_started(tmp_path: Path) -> None:
+def test_dispatch_events_once_marks_new_active_run_as_started(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     run_dir = artifacts / "demo" / "runs" / "run-2"
     (artifacts / "_watch").mkdir(parents=True)
@@ -630,20 +669,20 @@ def test_run_discord_notifier_once_marks_new_active_run_as_started(tmp_path: Pat
         json.dumps({"run_id": "run-2", "slug": "demo", "status": "running", "config": {"max_iterations": 3}}),
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=datetime(2026, 4, 23, 0, 0, tzinfo=UTC),
     )
 
-    assert notifier.events[0]["event_type"] == "autopilot.started"
-    assert notifier.events[0]["payload"]["discord_update_key"] == ("kaggle-autopilot:lab_rdp:local_gpu:run:run-2")
+    assert sink.events[0]["event_type"] == "autopilot.started"
+    assert sink.events[0]["payload"]["coalesce_key"] == ("kaggle-autopilot:local_gpu:run:run-2")
 
 
-def test_run_discord_notifier_once_creates_a_new_message_when_competition_changes(tmp_path: Path) -> None:
+def test_dispatch_events_once_creates_a_new_message_when_competition_changes(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"
     watch_dir.mkdir(parents=True)
@@ -655,17 +694,17 @@ def test_run_discord_notifier_once_creates_a_new_message_when_competition_change
             json.dumps({"status": "running", "config": {"max_iterations": 3}}),
             encoding="utf-8",
         )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
     first = datetime(2026, 4, 23, 0, 0, tzinfo=UTC)
 
     state_path.write_text(
         json.dumps({"active_slug": "first-comp", "active_run_id": "run-1", "last_status": "running"}),
         encoding="utf-8",
     )
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first,
     )
 
@@ -673,22 +712,22 @@ def test_run_discord_notifier_once_creates_a_new_message_when_competition_change
         json.dumps({"active_slug": "second-comp", "active_run_id": "run-2", "last_status": "running"}),
         encoding="utf-8",
     )
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=first + timedelta(minutes=5),
     )
 
-    assert [event["event_type"] for event in notifier.events] == ["autopilot.started", "autopilot.started"]
-    assert [event["payload"]["competition"] for event in notifier.events] == ["first-comp", "second-comp"]
-    assert [event["payload"]["discord_update_key"] for event in notifier.events] == [
-        "kaggle-autopilot:lab_rdp:local_gpu:run:run-1",
-        "kaggle-autopilot:lab_rdp:local_gpu:run:run-2",
+    assert [event["event_type"] for event in sink.events] == ["autopilot.started", "autopilot.started"]
+    assert [event["payload"]["competition"] for event in sink.events] == ["first-comp", "second-comp"]
+    assert [event["payload"]["coalesce_key"] for event in sink.events] == [
+        "kaggle-autopilot:local_gpu:run:run-1",
+        "kaggle-autopilot:local_gpu:run:run-2",
     ]
 
 
-def test_run_discord_notifier_once_does_not_mark_planning_as_iteration_completed(tmp_path: Path) -> None:
+def test_dispatch_events_once_does_not_mark_planning_as_iteration_completed(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     run_dir = artifacts / "demo" / "runs" / "run-1"
     (artifacts / "_watch").mkdir(parents=True)
@@ -708,19 +747,19 @@ def test_run_discord_notifier_once_does_not_mark_planning_as_iteration_completed
         json.dumps({"run_id": "run-1", "slug": "demo", "status": "running", "config": {"max_iterations": 3}}),
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=datetime(2026, 4, 23, 0, 0, tzinfo=UTC),
     )
 
-    assert notifier.events[0]["event_type"] == "autopilot.started"
+    assert sink.events[0]["event_type"] == "autopilot.started"
 
 
-def test_run_discord_notifier_once_reports_kaggle_gpu_sidecar_scope(tmp_path: Path) -> None:
+def test_dispatch_events_once_reports_kaggle_gpu_sidecar_scope(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     main_run_dir = artifacts / "main-demo" / "runs" / "run-main"
     side_run_dir = artifacts / "side-demo" / "runs" / "run-side"
@@ -741,29 +780,29 @@ def test_run_discord_notifier_once_reports_kaggle_gpu_sidecar_scope(tmp_path: Pa
             encoding="utf-8",
         )
 
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=datetime(2026, 4, 23, 0, 0, tzinfo=UTC),
     )
 
-    assert len(notifier.events) == 2
-    payloads = [event["payload"] for event in notifier.events]
+    assert len(sink.events) == 2
+    payloads = [event["payload"] for event in sink.events]
     side_payload = next(payload for payload in payloads if payload["competition"] == "side-demo")
     assert side_payload["compute"] == "kaggle_gpu"
     assert side_payload["state_scope"] == "kaggle_gpu"
-    assert side_payload["discord_update_key"] == "kaggle-autopilot:lab_rdp:kaggle_gpu:run:run-side"
+    assert side_payload["coalesce_key"] == "kaggle-autopilot:kaggle_gpu:run:run-side"
 
 
-def test_run_discord_notifier_once_replays_lifecycle_events_from_watch_ledger(tmp_path: Path) -> None:
+def test_dispatch_events_once_replays_lifecycle_events_from_watch_ledger(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"
     watch_dir.mkdir(parents=True)
     (watch_dir / "state.json").write_text(json.dumps({"last_status": "finished"}), encoding="utf-8")
-    (watch_dir / "discord_notifier_state.json").write_text(
+    (watch_dir / "event_delivery_state.json").write_text(
         json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0}),
         encoding="utf-8",
     )
@@ -794,43 +833,41 @@ def test_run_discord_notifier_once_replays_lifecycle_events_from_watch_ledger(tm
         + "\n",
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
     now = datetime(2026, 4, 23, 2, 0, tzinfo=UTC)
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=now,
     )
-    assert not run_discord_notifier_once(
+    assert not dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=now + timedelta(minutes=5),
     )
 
-    assert [event["event_type"] for event in notifier.events] == ["autopilot.started", "autopilot.finished"]
-    assert notifier.events[0]["payload"]["discord_update_key"] == ("kaggle-autopilot:lab_rdp:local_gpu:run:run-1")
-    assert notifier.events[1]["payload"]["discord_update_key"] == (
-        "kaggle-autopilot:lab_rdp:local_gpu:run:run-1:finished"
-    )
-    assert notifier.events[1]["payload"]["submission_status"] == "submitted"
-    assert notifier.events[1]["payload"]["submission_url"].endswith("/writeups/demo")
-    notifier_state = _read_json_object(watch_dir / "discord_notifier_state.json")
-    assert notifier_state[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
-    assert notifier_state[DELIVERED_LIFECYCLE_KEYS] == [
+    assert [event["event_type"] for event in sink.events] == ["autopilot.started", "autopilot.finished"]
+    assert sink.events[0]["payload"]["coalesce_key"] == ("kaggle-autopilot:local_gpu:run:run-1")
+    assert sink.events[1]["payload"]["coalesce_key"] == ("kaggle-autopilot:local_gpu:run:run-1:finished")
+    assert sink.events[1]["payload"]["submission_status"] == "submitted"
+    assert sink.events[1]["payload"]["submission_url"].endswith("/writeups/demo")
+    delivery_state = _read_json_object(watch_dir / "event_delivery_state.json")
+    assert delivery_state[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
+    assert delivery_state[DELIVERED_LIFECYCLE_KEYS] == [
         "kaggle-autopilot:local_gpu:autopilot.started:first-comp:run-1",
         "kaggle-autopilot:local_gpu:autopilot.finished:first-comp:run-1",
     ]
 
 
-def test_run_discord_notifier_once_suppresses_duplicate_started_lifecycle(tmp_path: Path) -> None:
+def test_dispatch_events_once_suppresses_duplicate_started_lifecycle(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"
     watch_dir.mkdir(parents=True)
     (watch_dir / "state.json").write_text(json.dumps({"last_status": "finished"}), encoding="utf-8")
-    (watch_dir / "discord_notifier_state.json").write_text(
+    (watch_dir / "event_delivery_state.json").write_text(
         json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0}),
         encoding="utf-8",
     )
@@ -850,17 +887,17 @@ def test_run_discord_notifier_once_suppresses_duplicate_started_lifecycle(tmp_pa
         + "\n",
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=datetime(2026, 4, 23, 3, 0, tzinfo=UTC),
     )
 
-    assert [event["event_type"] for event in notifier.events] == ["autopilot.started"]
-    assert _read_json_object(watch_dir / "discord_notifier_state.json")[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
+    assert [event["event_type"] for event in sink.events] == ["autopilot.started"]
+    assert _read_json_object(watch_dir / "event_delivery_state.json")[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
 
 
 def test_started_lifecycle_is_immediately_updated_to_current_oracle_phase(tmp_path: Path) -> None:
@@ -885,7 +922,7 @@ def test_started_lifecycle_is_immediately_updated_to_current_oracle_phase(tmp_pa
         json.dumps({"status": "running", "config": {"max_iterations": 3}}),
         encoding="utf-8",
     )
-    (watch_dir / "discord_notifier_state.json").write_text(
+    (watch_dir / "event_delivery_state.json").write_text(
         json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0}),
         encoding="utf-8",
     )
@@ -902,18 +939,18 @@ def test_started_lifecycle_is_immediately_updated_to_current_oracle_phase(tmp_pa
         + "\n",
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=datetime(2026, 4, 23, 0, 1, tzinfo=UTC),
     )
 
-    assert [event["event_type"] for event in notifier.events] == ["autopilot.started", "autopilot.status"]
-    assert notifier.events[-1]["payload"]["phase"] == "oracle_strategy"
-    assert notifier.events[0]["payload"]["discord_update_key"] == notifier.events[-1]["payload"]["discord_update_key"]
+    assert [event["event_type"] for event in sink.events] == ["autopilot.started", "autopilot.status"]
+    assert sink.events[-1]["payload"]["phase"] == "oracle_strategy"
+    assert sink.events[0]["payload"]["coalesce_key"] == sink.events[-1]["payload"]["coalesce_key"]
 
 
 def test_historical_failure_replay_does_not_restart_current_run_notification(tmp_path: Path) -> None:
@@ -935,7 +972,7 @@ def test_historical_failure_replay_does_not_restart_current_run_notification(tmp
     )
     (run_dir / "run.json").write_text(json.dumps({"status": "running"}), encoding="utf-8")
     current_started_key = "kaggle-autopilot:local_gpu:autopilot.started:current-comp:current-run"
-    (watch_dir / "discord_notifier_state.json").write_text(
+    (watch_dir / "event_delivery_state.json").write_text(
         json.dumps(
             {
                 LEDGER_CURSOR_INITIALIZED_KEY: True,
@@ -959,21 +996,21 @@ def test_historical_failure_replay_does_not_restart_current_run_notification(tmp
         + "\n",
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=datetime(2026, 4, 23, 0, 1, tzinfo=UTC),
     )
 
-    assert [event["event_type"] for event in notifier.events] == ["autopilot.failed", "autopilot.status"]
-    assert notifier.events[-1]["payload"]["competition"] == "current-comp"
-    assert notifier.events[-1]["payload"]["phase"] == "preparing_data"
+    assert [event["event_type"] for event in sink.events] == ["autopilot.failed", "autopilot.status"]
+    assert sink.events[-1]["payload"]["competition"] == "current-comp"
+    assert sink.events[-1]["payload"]["phase"] == "preparing_data"
 
 
-def test_run_discord_notifier_once_retries_lifecycle_without_advancing_cursor(tmp_path: Path) -> None:
+def test_dispatch_events_once_retries_lifecycle_without_advancing_cursor(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"
     run_dir = artifacts / "new-comp" / "runs" / "run-2"
@@ -987,7 +1024,7 @@ def test_run_discord_notifier_once_retries_lifecycle_without_advancing_cursor(tm
         json.dumps({"status": "running", "config": {"max_iterations": 3}}),
         encoding="utf-8",
     )
-    (watch_dir / "discord_notifier_state.json").write_text(
+    (watch_dir / "event_delivery_state.json").write_text(
         json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0}),
         encoding="utf-8",
     )
@@ -1004,37 +1041,35 @@ def test_run_discord_notifier_once_retries_lifecycle_without_advancing_cursor(tm
         + "\n",
         encoding="utf-8",
     )
-    notifier = FailingOnceNotifier()
+    sink = FailingOnceSink()
     now = datetime(2026, 4, 23, 0, 5, tzinfo=UTC)
 
-    assert not run_discord_notifier_once(
+    assert not dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=now,
     )
-    assert _read_json_object(watch_dir / "discord_notifier_state.json")[LEDGER_OFFSET_KEY] == 0
-    assert run_discord_notifier_once(
+    assert _read_json_object(watch_dir / "event_delivery_state.json")[LEDGER_OFFSET_KEY] == 0
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=now + timedelta(minutes=5),
     )
 
-    assert len(notifier.events) == 3
-    assert [event["event_type"] for event in notifier.events] == [
+    assert len(sink.events) == 3
+    assert [event["event_type"] for event in sink.events] == [
         "autopilot.started",
         "autopilot.started",
         "autopilot.status",
     ]
-    assert notifier.events[0]["dedupe_key"] == notifier.events[1]["dedupe_key"]
-    assert notifier.events[-1]["payload"]["discord_update_key"] == ("kaggle-autopilot:lab_rdp:local_gpu:run:run-2")
-    assert _read_json_object(watch_dir / "discord_notifier_state.json")[LEDGER_OFFSET_KEY] == (
-        ledger_path.stat().st_size
-    )
+    assert sink.events[0]["dedupe_key"] == sink.events[1]["dedupe_key"]
+    assert sink.events[-1]["payload"]["coalesce_key"] == ("kaggle-autopilot:local_gpu:run:run-2")
+    assert _read_json_object(watch_dir / "event_delivery_state.json")[LEDGER_OFFSET_KEY] == (ledger_path.stat().st_size)
 
 
-def test_run_discord_notifier_once_initializes_ledger_cursor_without_replaying_history(tmp_path: Path) -> None:
+def test_dispatch_events_once_initializes_ledger_cursor_without_replaying_history(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"
     watch_dir.mkdir(parents=True)
@@ -1052,16 +1087,16 @@ def test_run_discord_notifier_once_initializes_ledger_cursor_without_replaying_h
         + "\n",
         encoding="utf-8",
     )
-    notifier = RecordingNotifier()
+    sink = RecordingSink()
 
-    assert run_discord_notifier_once(
+    assert dispatch_events_once(
         artifacts_dir=artifacts,
         heartbeat_sec=1800,
-        notifier=notifier,
+        sink=sink,
         now=datetime(2026, 4, 23, tzinfo=UTC),
     )
 
-    assert [event["event_type"] for event in notifier.events] == ["autopilot.status"]
-    notifier_state = _read_json_object(watch_dir / "discord_notifier_state.json")
-    assert notifier_state[LEDGER_CURSOR_INITIALIZED_KEY] is True
-    assert notifier_state[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
+    assert [event["event_type"] for event in sink.events] == ["autopilot.status"]
+    delivery_state = _read_json_object(watch_dir / "event_delivery_state.json")
+    assert delivery_state[LEDGER_CURSOR_INITIALIZED_KEY] is True
+    assert delivery_state[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size

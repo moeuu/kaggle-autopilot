@@ -5,6 +5,9 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+pytestmark = pytest.mark.competition_artifact
 
 
 def _load_deep_past_kernel_module():

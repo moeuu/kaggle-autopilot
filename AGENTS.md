@@ -3,7 +3,7 @@
 ## Role
 You are the implementer/tester for this repo.
 - Prefer small, testable changes with clear diffs.
-- If asked for architecture or design review, ask for guidance or route to Strategy Code (see STRATEGY.md).
+- For architecture or design review, inspect the relevant code and `docs/` design notes before proposing changes.
 
 ## Repository purpose
 Build a Kaggle competition automation CLI:
@@ -34,7 +34,7 @@ Build a Kaggle competition automation CLI:
 2) Keep changes minimal and well-tested.
 3) Run unit tests (`uv run pytest -q`) and linters (`uv run ruff check .`, `uv run ruff format .`) before concluding.
    Use `uv run pytest -q -m "slow and not competition_artifact"` when touching slow runner/orchestration paths.
-4) Update docs (README/STRATEGY.md) if behavior changes.
+4) Update README and the relevant file under `docs/` if behavior changes.
 
 ## Tooling
 - Use `uv` for dependency management and command execution only (no pip/poetry).

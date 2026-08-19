@@ -62,30 +62,34 @@ settings belong in `~/.config/kagglebot-autopilot/watch.env`; start from `deploy
 tokens out of the repository. Enabling user lingering with `loginctl enable-linger "$USER"` makes enabled user services
 start at boot without waiting for an interactive login.
 
-## Discord Status Notifications
+## Generic Event Notifications
 
-Run the notification worker separately from `watch`:
+`watch` includes a background event dispatcher. No separate notification service is needed. To flush the durable
+outbox manually once:
 
 ```bash
-uv run kagglebot discord-notifier --interval-sec 300 --heartbeat-sec 1800
+uv run kagglebot event-dispatch --heartbeat-sec 1800
 ```
 
-Configure `KAGGLEBOT_DISCORD_EVENT_API_URL`, `KAGGLEBOT_DISCORD_EVENT_API_TOKEN`, and optionally
-`KAGGLEBOT_DISCORD_EVENT_ACCOUNT`. The worker monitors the local and sidecar watch scopes under
-`artifacts/_watch/`.
+Configure `KAGGLEBOT_EVENT_SINK_URL`, `KAGGLEBOT_EVENT_SINK_TOKEN`, and optionally
+`KAGGLEBOT_INSTALLATION_ID`. These settings describe a generic authenticated HTTP Event API; channel-specific
+credentials and routes belong to the receiving service. The dispatcher monitors local and sidecar watch scopes under
+`artifacts/_watch/` only while `watch` is running.
 
-Each run uses a `discord_update_key` containing its `run_id`, so switching to a new competition/run creates a new
-Discord message while heartbeat updates for the same run edit that run's status card. Completion and failure use
-separate event keys. The worker also consumes `started`, `finished`, and `failed` records from each watch
+Each run uses a `coalesce_key` containing its `run_id`, so switching to a new competition/run creates a new
+downstream notification while heartbeat updates can coalesce for the same run. Completion and failure use separate
+event keys. The dispatcher also consumes `started`, `finished`, and `failed` records from each watch
 `ledger.jsonl` with a persisted byte offset. It advances the offset only after the event API reports at least one
 matched route, so transient API failures and missing route configuration are retried instead of silently discarded.
 On first upgrade, the cursor starts at the end of the existing ledger to avoid replaying historical notifications;
 the current watch snapshot is still emitted normally.
 
-Each Event API attempt is appended to `_watch/discord_delivery_receipts.jsonl` before the watch-ledger cursor
+Each Event API attempt is appended to `_watch/event_delivery_receipts.jsonl` before the watch-ledger cursor
 advances. The receipt records the client Event ID, matched route count, server acknowledgement/status, dedupe key,
-and ledger offsets. `matched_routes > 0` proves route acceptance; the recorded server status is the downstream
-delivery audit evidence when a Discord message is not visible.
+and ledger offsets. `matched_routes > 0` proves route acceptance; the recorded server status is downstream delivery
+audit evidence. Active status payloads include `lease_expires_at`, allowing the receiver to emit one offline event
+after a machine or process disappears instead of treating an old `state.json` as running forever. Payloads exclude
+hostnames and local absolute paths.
 
 For an active run, the watch state's status and phase are authoritative. An inner stage may leave `run.json` at a
 failure status while Oracle/Codex autofix or recovery is already running; notification snapshots report that active
@@ -313,7 +317,7 @@ Submission behavior:
   ambiguous payload hashes are never resubmitted automatically. Before resuming an active writeup run, `watch` performs
   a read-only, exact-title reconciliation against the authenticated Kaggle Writeups listing. Only a matching page with
   Kaggle's explicit `Submitted!` state closes the run; its URL and status are persisted to the run/watch ledgers and
-  included in the Discord completion event. Draft, missing, title-mismatched, and ambiguous pages remain non-terminal.
+  included in the generic completion event. Draft, missing, title-mismatched, and ambiguous pages remain non-terminal.
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
 - notebook submissions with tiny public `test`/`sample_submission` fixtures are treated as hidden/full-test code competitions and use inference-mode notebook submit instead of embedding a local public-test artifact in a wrapper kernel
 - completed Code Competition notebooks are not sent directly: Codex first reviews immutable Notebook/model/output/runtime-log evidence, then a deterministic guard re-hashes the evidence and rechecks expected output, known quota, exact Notebook-version duplicate identity, and ledger before the API executor runs. Restored scores with zero current evaluation rows and no full model-backed runtime evidence, fallback-only real predictions, repeated runtime exceptions, and persisted dependency/cache output trees fail closed even if Codex says approve. Hosted gateways are validated separately: `run_local_gateway` and hidden-only `serve()` are rejected, `serve()` must run before the visible fallback, and the tiny visible placeholder is not misclassified as the hidden evaluator's prediction set. A successful API call records the exact kernel/version/output identity immediately.
@@ -617,7 +621,7 @@ Key files:
 - Submit failures now persist a structured `submit_failure_context.json` snapshot so `submit_autofix` can distinguish between submission-file repairs, submit-mode/kernel fixes, platform issues, and manual blockers such as missing rules acceptance or credentials.
 - For local kernel training (`local_gpu`), terminal logs show elapsed/ETA and stage progress (`seed i/N`, `fold j/K`, `step s/T`) when patterns are detectable from kernel output. Local kernels have a 1440-minute hard wall-clock timeout by default, enforced by the parent process rather than relying on generated kernel code. Override it with `--time-budget-min` or `KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN` (`0` keeps the existing explicit unlimited escape hatch).
 - Historical ETA is used only for the exact staged-kernel source fingerprint. Once that median is exceeded, status reports `eta=unknown` instead of `eta~0s`. If the same exact source times out twice, or has at least two completed runs whose median exceeds the configured hard timeout, preflight rejects it for runtime-contract repair; it does not automatically remove models, folds, seeds, resolution, or other accuracy-bearing work.
-- Discord status reports the active iteration's submit state. While an enabled run is still training it shows `pending`; it does not copy `disabled` or another terminal submit state from the previous completed iteration.
+- Event status reports the active iteration's submit state. While an enabled run is still training it shows `pending`; it does not copy `disabled` or another terminal submit state from the previous completed iteration.
 - Local-to-Kaggle GPU handoff is a last resort. A timeout, exhausted CUDA-OOM retry, host-memory guard, stall, or
   SIGKILL-style exit must repeat three times with the same resource-failure class after the Oracle-to-Codex repair
   loop before handoff is considered. A missing local GPU is immediately eligible, but every handoff still requires

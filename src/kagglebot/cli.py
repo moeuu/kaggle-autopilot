@@ -18,9 +18,9 @@ from kagglebot.campaign import normalize_campaign_mode
 from kagglebot.competition import parse_competition_slug
 from kagglebot.competition_submission_formats import crawl_submission_formats
 from kagglebot.compute import Compute, resolve_accelerator
-from kagglebot.discord_notifications import run_discord_notifier_forever, run_discord_notifier_once
 from kagglebot.env_utils import env_flag
 from kagglebot.eval import EvaluationAdvisor
+from kagglebot.event_notifications import EventDispatcher, dispatch_events_once
 from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAbortedError
 from kagglebot.experiment_graph import normalize_portfolio_execution
 from kagglebot.hardware import resolve_hardware_profile
@@ -815,6 +815,7 @@ def watch(
     if once:
         result = run_watch_once(watch_config)
         run_watch_self_improvement(watch_config)
+        EventDispatcher(artifacts_dir=cfg.artifacts_dir).flush()
         print(f"[green]watch cycle[/green]: {result.status} slug={result.slug} run_id={result.run_id}")
         return
     run_watch_forever(
@@ -960,6 +961,7 @@ def watch_kaggle_gpu_sidecar(
     if once:
         result = run_watch_once(watch_config)
         run_watch_self_improvement(watch_config)
+        EventDispatcher(artifacts_dir=cfg.artifacts_dir).flush()
         print(f"[green]kaggle gpu sidecar[/green]: {result.status} slug={result.slug} run_id={result.run_id}")
         return
     run_watch_forever(
@@ -1010,26 +1012,18 @@ def self_improve(
     print(f"[green]self-improvement[/green]: {json.dumps(result, sort_keys=True)}")
 
 
-@app.command("discord-notifier")
-def discord_notifier(
+@app.command("event-dispatch")
+def event_dispatch(
     ctx: typer.Context,
-    once: bool = typer.Option(False, "--once", help="Send one status notification and exit."),
-    interval_sec: int = typer.Option(300, "--interval-sec", min=1, help="Polling interval."),
     heartbeat_sec: int = typer.Option(1800, "--heartbeat-sec", min=1, help="Send unchanged status at this interval."),
     force: bool = typer.Option(False, "--force", help="Send even if the status snapshot has not changed."),
 ) -> None:
+    """Flush the durable event outbox once; watch dispatches automatically."""
     cfg = ctx.obj
-    if once:
-        run_discord_notifier_once(
-            artifacts_dir=cfg.artifacts_dir,
-            heartbeat_sec=heartbeat_sec,
-            force=force,
-        )
-        return
-    run_discord_notifier_forever(
+    dispatch_events_once(
         artifacts_dir=cfg.artifacts_dir,
-        interval_sec=interval_sec,
         heartbeat_sec=heartbeat_sec,
+        force=force,
     )
 
 

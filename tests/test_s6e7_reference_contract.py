@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import pytest
 
 pytestmark = pytest.mark.competition_artifact
 
-ARTIFACT_ROOT = Path("/data/morita/kaggle-autopilot-artifacts/playground-series-s6e7")
+ARTIFACT_ROOT = Path(os.environ.get("KAGGLEBOT_ARTIFACTS_DIR", "artifacts")) / "playground-series-s6e7"
 KERNEL_PATH = ARTIFACT_ROOT / "kernel/kernel.py"
 PLAN_PATH = ARTIFACT_ROOT / "plan.json"
 

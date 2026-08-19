@@ -34,7 +34,7 @@ _NOISE_PREFIXES = (
     ".venv/",
 )
 _NOISE_SUFFIXES = (".pyc", ".pyo", ".DS_Store")
-_DISCORD_NOTIFIER_STATE_FILENAME = "discord_notifier_state.json"
+_EVENT_DELIVERY_STATE_FILENAME = "event_delivery_state.json"
 _SAMPLE_SUBMISSION_SUFFIXES = set(TABULAR_SUBMISSION_SUFFIXES)
 
 
@@ -331,7 +331,7 @@ def _is_noise_path(path: str, denied_prefixes: list[str] | None = None) -> bool:
     denied = denied_prefixes or []
     if _is_denied(path, denied):
         return False
-    if _is_discord_notifier_state_path(path):
+    if _is_event_delivery_state_path(path):
         return True
     if path.startswith("artifacts/") and "/kernels/" in path:
         return True
@@ -350,9 +350,9 @@ def _is_noise_path(path: str, denied_prefixes: list[str] | None = None) -> bool:
     return False
 
 
-def _is_discord_notifier_state_path(path: str) -> bool:
+def _is_event_delivery_state_path(path: str) -> bool:
     parts = path.split("/")
-    return len(parts) >= 3 and parts[-1] == _DISCORD_NOTIFIER_STATE_FILENAME and "_watch" in parts[:-1]
+    return len(parts) >= 3 and parts[-1] == _EVENT_DELIVERY_STATE_FILENAME and "_watch" in parts[:-1]
 
 
 def _snapshot_external_guard_paths(paths: Sequence[Path]) -> dict[str, bytes | None]:

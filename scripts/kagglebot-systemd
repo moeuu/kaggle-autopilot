@@ -3,7 +3,6 @@ set -euo pipefail
 
 readonly service_names=(
   kagglebot-watch.service
-  kagglebot-discord-notifier.service
 )
 readonly timer_names=(
   kagglebot-oracle-update.timer
@@ -52,6 +51,7 @@ install_services() {
   for unit_name in "${unit_names[@]}"; do
     ln -sfn "${current_link}/deploy/systemd/${unit_name}" "${user_unit_dir}/${unit_name}"
   done
+  rm -f "${user_unit_dir}/kagglebot-discord-notifier.service"
 
   systemctl --user daemon-reload
   systemctl --user enable "${service_names[@]}" "${timer_names[@]}"
@@ -93,6 +93,7 @@ uninstall_services() {
   for unit_name in "${unit_names[@]}"; do
     rm -f "${user_unit_dir}/${unit_name}"
   done
+  rm -f "${user_unit_dir}/kagglebot-discord-notifier.service"
   rm -f "${current_link}" "${uv_link}"
   systemctl --user daemon-reload
   printf 'Removed Kagglebot user services. Configuration files were preserved.\n'

@@ -13,7 +13,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ARTIFACT_ROOT = Path("/data/morita/kaggle-autopilot-artifacts/soccer-feature-engineering-hackathon")
+pytestmark = pytest.mark.competition_artifact
+
+ARTIFACT_ROOT = Path(os.environ.get("KAGGLEBOT_ARTIFACTS_DIR", "artifacts")) / "soccer-feature-engineering-hackathon"
 KERNEL_PATH = ARTIFACT_ROOT / "kernel/kernel.py"
 ARCHIVE_PATH = ARTIFACT_ROOT / "data/soccer-feature-engineering-hackathon.zip"
 CANONICAL_SHA256 = "bdd20c5d9da6edadaab546dbf76403e464d48b33aac31bdbbc26b7c0f1cbb9b4"

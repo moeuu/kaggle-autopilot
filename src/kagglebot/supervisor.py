@@ -24,6 +24,7 @@ from kagglebot.data_readiness import assess_local_training_data
 from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.env_utils import env_flag, env_optional_int, parse_float_value, parse_int_value, read_env_or_file
 from kagglebot.eval import EvaluationAdvisor
+from kagglebot.event_notifications import EventDispatcher
 from kagglebot.exceptions import (
     KaggleCliResourceError,
     KernelCapacityError,
@@ -336,31 +337,36 @@ def run_watch_forever(
     sleep_error_sec: int,
 ) -> None:
     loaded_repository_head = _repository_head(config.repository_root)
-    while True:
-        try:
-            result = run_watch_once(config)
-        except Exception as exc:  # noqa: BLE001
-            WatchLedger(config.ledger_path).append("failed", reason=type(exc).__name__, error=str(exc))
-            print(f"[red]watch failed[/red]: {exc}")
+    dispatcher = EventDispatcher(artifacts_dir=config.artifacts_dir)
+    dispatcher.start()
+    try:
+        while True:
+            try:
+                result = run_watch_once(config)
+            except Exception as exc:  # noqa: BLE001
+                WatchLedger(config.ledger_path).append("failed", reason=type(exc).__name__, error=str(exc))
+                print(f"[red]watch failed[/red]: {exc}")
+                _maybe_run_self_improvement(config)
+                _restart_after_repository_head_change(
+                    repository_root=config.repository_root,
+                    loaded_head=loaded_repository_head,
+                    dry_run=config.dry_run,
+                )
+                time.sleep(max(1, sleep_error_sec))
+                continue
             _maybe_run_self_improvement(config)
             _restart_after_repository_head_change(
                 repository_root=config.repository_root,
                 loaded_head=loaded_repository_head,
                 dry_run=config.dry_run,
             )
-            time.sleep(max(1, sleep_error_sec))
-            continue
-        _maybe_run_self_improvement(config)
-        _restart_after_repository_head_change(
-            repository_root=config.repository_root,
-            loaded_head=loaded_repository_head,
-            dry_run=config.dry_run,
-        )
-        if result.status in {"no_candidates", "dry_run", "no_capacity", "locked"}:
-            time.sleep(max(1, sleep_empty_sec))
-            continue
-        if result.status in {"blocked", "failed", "skipped"}:
-            time.sleep(max(1, sleep_error_sec))
+            if result.status in {"no_candidates", "dry_run", "no_capacity", "locked"}:
+                time.sleep(max(1, sleep_empty_sec))
+                continue
+            if result.status in {"blocked", "failed", "skipped"}:
+                time.sleep(max(1, sleep_error_sec))
+    finally:
+        dispatcher.stop()
 
 
 def run_watch_once(config: WatchConfig) -> WatchCycleResult:

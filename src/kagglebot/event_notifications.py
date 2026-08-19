@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import socket
-import time
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -24,9 +23,11 @@ from kagglebot.kaggle_api import leaderboard_rank_for_score
 from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
 
 SOURCE = "kaggle-autopilot"
-DEFAULT_ACCOUNT = "lab_rdp"
-STATE_FILENAME = "discord_notifier_state.json"
-DELIVERY_RECEIPTS_FILENAME = "discord_delivery_receipts.jsonl"
+STATE_FILENAME = "event_delivery_state.json"
+DELIVERY_RECEIPTS_FILENAME = "event_delivery_receipts.jsonl"
+DEFAULT_DISPATCH_INTERVAL_SEC = 60
+DEFAULT_HEARTBEAT_SEC = 1800
+DEFAULT_LEASE_SEC = 3900
 LEDGER_OFFSET_KEY = "watch_ledger_offset"
 LEDGER_CURSOR_INITIALIZED_KEY = "watch_ledger_cursor_initialized"
 DELIVERED_LIFECYCLE_KEYS = "delivered_lifecycle_keys"
@@ -39,16 +40,16 @@ _LIFECYCLE_EVENT_TYPES = {
 
 
 @dataclass(frozen=True)
-class DiscordEventConfig:
+class HttpEventSinkConfig:
     api_url: str
     api_token: str
-    account: str = DEFAULT_ACCOUNT
+    account: str | None = None
     source: str = SOURCE
     timeout_sec: float = 10.0
 
 
 @dataclass(frozen=True)
-class DiscordEventReceipt:
+class EventDeliveryReceipt:
     accepted: bool
     event_id: str = ""
     event_type: str = ""
@@ -76,8 +77,8 @@ class DiscordEventReceipt:
         }
 
 
-class DiscordEventNotifier:
-    def __init__(self, config: DiscordEventConfig | None) -> None:
+class HttpEventSink:
+    def __init__(self, config: HttpEventSinkConfig | None) -> None:
         self.config = config
 
     @property
@@ -92,9 +93,9 @@ class DiscordEventNotifier:
         dedupe_key: str,
         payload: dict[str, object],
         occurred_at: datetime | None = None,
-    ) -> DiscordEventReceipt:
+    ) -> EventDeliveryReceipt:
         if self.config is None:
-            return DiscordEventReceipt(
+            return EventDeliveryReceipt(
                 accepted=False,
                 event_type=event_type,
                 dedupe_key=dedupe_key,
@@ -103,16 +104,17 @@ class DiscordEventNotifier:
         occurred = occurred_at or datetime.now(UTC)
         event_id = f"evt-kaggle-autopilot-{occurred.strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
         occurred_text = occurred.isoformat().replace("+00:00", "Z")
-        body = {
+        body: dict[str, object] = {
             "id": event_id,
             "source": self.config.source,
             "type": event_type,
             "occurred_at": occurred_text,
-            "account": self.config.account,
             "severity": severity,
             "dedupe_key": dedupe_key,
             "payload": payload,
         }
+        if self.config.account:
+            body["account"] = self.config.account
         data = json.dumps(body, ensure_ascii=True).encode("utf-8")
         request = urllib.request.Request(
             self.config.api_url,
@@ -120,7 +122,7 @@ class DiscordEventNotifier:
             headers={
                 "authorization": f"Bearer {self.config.api_token}",
                 "content-type": "application/json",
-                "user-agent": "kaggle-autopilot-discord-notifier/1.0",
+                "user-agent": "kaggle-autopilot-event-sink/1.0",
             },
             method="POST",
         )
@@ -128,8 +130,8 @@ class DiscordEventNotifier:
             with urllib.request.urlopen(request, timeout=self.config.timeout_sec) as response:
                 raw = response.read()
         except (OSError, urllib.error.HTTPError, urllib.error.URLError) as exc:
-            print(f"[yellow]discord notify failed[/yellow]: {exc}")
-            return DiscordEventReceipt(
+            print(f"[yellow]event delivery failed[/yellow]: {exc}")
+            return EventDeliveryReceipt(
                 accepted=False,
                 event_id=event_id,
                 event_type=event_type,
@@ -139,11 +141,15 @@ class DiscordEventNotifier:
             )
         parsed = parse_json_object_bytes(raw) or {}
         matched_routes = _int_or_none(parsed.get("matched_routes")) or 0
-        response_event_id = _response_text(parsed, "event_id", "id")
-        response_status = _response_text(parsed, "delivery_status", "status")
+        response_event = parsed.get("event") if isinstance(parsed.get("event"), dict) else {}
+        assert isinstance(response_event, dict)
+        response_event_id = _response_text(parsed, "event_id", "id") or _response_text(response_event, "id")
+        response_status = _response_text(parsed, "delivery_status", "status") or _response_text(
+            response_event, "status"
+        )
         if matched_routes <= 0:
-            print("[yellow]discord notify accepted but matched no routes[/yellow]")
-            return DiscordEventReceipt(
+            print("[yellow]event delivery accepted but matched no routes[/yellow]")
+            return EventDeliveryReceipt(
                 accepted=False,
                 event_id=event_id,
                 event_type=event_type,
@@ -154,7 +160,7 @@ class DiscordEventNotifier:
                 response_status=response_status,
                 error="accepted_without_matching_route",
             )
-        return DiscordEventReceipt(
+        return EventDeliveryReceipt(
             accepted=True,
             event_id=event_id,
             event_type=event_type,
@@ -166,16 +172,16 @@ class DiscordEventNotifier:
         )
 
 
-def notifier_from_env() -> DiscordEventNotifier:
-    api_url = _env_first("KAGGLEBOT_DISCORD_EVENT_API_URL", "DISCORD_EVENT_API_URL")
-    token = _env_first("KAGGLEBOT_DISCORD_EVENT_API_TOKEN", "DISCORD_EVENT_API_TOKEN", "EVENT_API_TOKEN")
+def event_sink_from_env() -> HttpEventSink:
+    api_url = _env_first("KAGGLEBOT_EVENT_SINK_URL")
+    token = _env_first("KAGGLEBOT_EVENT_SINK_TOKEN")
     if not api_url or not token:
-        return DiscordEventNotifier(None)
-    account = _env_first("KAGGLEBOT_DISCORD_EVENT_ACCOUNT") or DEFAULT_ACCOUNT
-    timeout_raw = _env_first("KAGGLEBOT_DISCORD_EVENT_TIMEOUT_SEC")
+        return HttpEventSink(None)
+    account = _env_first("KAGGLEBOT_INSTALLATION_ID")
+    timeout_raw = _env_first("KAGGLEBOT_EVENT_SINK_TIMEOUT_SEC")
     timeout = _float_or_default(timeout_raw, 10.0)
-    return DiscordEventNotifier(
-        DiscordEventConfig(
+    return HttpEventSink(
+        HttpEventSinkConfig(
             api_url=api_url,
             api_token=token,
             account=account,
@@ -184,25 +190,25 @@ def notifier_from_env() -> DiscordEventNotifier:
     )
 
 
-def run_discord_notifier_once(
+def dispatch_events_once(
     *,
     artifacts_dir: Path,
     heartbeat_sec: int,
     force: bool = False,
-    notifier: DiscordEventNotifier | None = None,
+    sink: HttpEventSink | None = None,
     now: datetime | None = None,
 ) -> bool:
-    notifier = notifier or notifier_from_env()
+    sink = sink or event_sink_from_env()
     current_time = now or datetime.now(UTC)
     sent_any = False
     for watch_state_path in _watch_state_paths(artifacts_dir):
         sent_any = (
-            _run_discord_notifier_for_watch_state(
+            _dispatch_events_for_watch_state(
                 artifacts_dir=artifacts_dir,
                 watch_state_path=watch_state_path,
                 heartbeat_sec=heartbeat_sec,
                 force=force,
-                notifier=notifier,
+                sink=sink,
                 current_time=current_time,
             )
             or sent_any
@@ -210,13 +216,13 @@ def run_discord_notifier_once(
     return sent_any
 
 
-def _run_discord_notifier_for_watch_state(
+def _dispatch_events_for_watch_state(
     *,
     artifacts_dir: Path,
     watch_state_path: Path,
     heartbeat_sec: int,
     force: bool,
-    notifier: DiscordEventNotifier,
+    sink: HttpEventSink,
     current_time: datetime,
 ) -> bool:
     snapshot = build_autopilot_status_payload(
@@ -233,7 +239,7 @@ def _run_discord_notifier_for_watch_state(
         state_path=state_path,
         state=state,
         snapshot=snapshot,
-        notifier=notifier,
+        sink=sink,
         current_time=current_time,
     )
     if lifecycle_blocked:
@@ -267,14 +273,14 @@ def _run_discord_notifier_for_watch_state(
         if current_run_id and current_run_id != last_run_id:
             state["last_run_id"] = current_run_id
             write_json_object(state_path, state, sort_keys=True)
-        print(f"[cyan]discord notifier[/cyan]: unchanged ({snapshot_key})")
+        print(f"[cyan]event dispatcher[/cyan]: unchanged ({snapshot_key})")
         return False
-    if not notifier.enabled:
-        print("[yellow]discord notifier[/yellow]: disabled; set KAGGLEBOT_DISCORD_EVENT_API_URL and token")
+    if not sink.enabled:
+        print("[yellow]event dispatcher[/yellow]: disabled; set KAGGLEBOT_EVENT_SINK_URL and token")
         return False
     snapshot = dict(snapshot)
-    snapshot["discord_update_key"] = _discord_event_update_key(snapshot=snapshot, event_type=event_type)
-    receipt = notifier.emit(
+    snapshot["coalesce_key"] = _event_coalesce_key(snapshot=snapshot, event_type=event_type)
+    receipt = sink.emit(
         event_type=event_type,
         severity=_severity_for_snapshot(snapshot),
         dedupe_key=_dedupe_key(snapshot=snapshot, event_type=event_type, now=current_time),
@@ -297,7 +303,7 @@ def _run_discord_notifier_for_watch_state(
             }
         )
         write_json_object(state_path, state, sort_keys=True)
-        print(f"[green]discord notifier[/green]: sent {event_type} ({snapshot_key})")
+        print(f"[green]event dispatcher[/green]: sent {event_type} ({snapshot_key})")
     return bool(receipt)
 
 
@@ -308,10 +314,10 @@ def _replay_watch_lifecycle_events(
     state_path: Path,
     state: dict[str, object],
     snapshot: dict[str, object],
-    notifier: DiscordEventNotifier,
+    sink: HttpEventSink,
     current_time: datetime,
 ) -> tuple[bool, bool]:
-    if not notifier.enabled:
+    if not sink.enabled:
         return False, False
 
     ledger_path = watch_state_path.with_name("ledger.jsonl")
@@ -347,10 +353,10 @@ def _replay_watch_lifecycle_events(
                 offset = next_offset
                 state[LEDGER_OFFSET_KEY] = offset
                 write_json_object(state_path, state, sort_keys=True)
-                print(f"[cyan]discord notifier[/cyan]: skipped duplicate lifecycle {dedupe_key}")
+                print(f"[cyan]event dispatcher[/cyan]: skipped duplicate lifecycle {dedupe_key}")
                 saved_offset = offset
                 continue
-            receipt = notifier.emit(
+            receipt = sink.emit(
                 event_type=event_type,
                 severity="error" if event_name == "failed" else "info",
                 dedupe_key=dedupe_key,
@@ -377,7 +383,7 @@ def _replay_watch_lifecycle_events(
             state["last_sent_at"] = current_time.isoformat()
             state[LEDGER_OFFSET_KEY] = offset
             write_json_object(state_path, state, sort_keys=True)
-            print(f"[green]discord notifier[/green]: replayed {event_type} at ledger offset {offset}")
+            print(f"[green]event dispatcher[/green]: replayed {event_type} at ledger offset {offset}")
             saved_offset = offset
             continue
         offset = next_offset
@@ -420,7 +426,7 @@ def _persist_delivery_receipt(
     ledger_next_offset: int | None = None,
 ) -> None:
     """Append an API acknowledgement before advancing any lifecycle cursor."""
-    if not isinstance(receipt, DiscordEventReceipt):
+    if not isinstance(receipt, EventDeliveryReceipt):
         return
     record = receipt.as_record()
     record.update(
@@ -457,10 +463,8 @@ def _lifecycle_payload(
         dict(snapshot)
         if same_run
         else {
-            "host": socket.gethostname(),
             "compute": compute,
             "state_scope": state_scope,
-            "artifact_root": str(artifacts_dir / slug) if slug else str(artifacts_dir),
             "observed_at": (_parse_datetime(record.get("ts")) or current_time).isoformat(),
         }
     )
@@ -469,8 +473,6 @@ def _lifecycle_payload(
         payload["slug"] = slug
     if run_id:
         payload["run_id"] = run_id
-        if slug:
-            payload["run_dir"] = str(artifacts_dir / slug / "runs" / run_id)
     payload["status"] = "running" if event_name == "started" else event_name
     payload["phase"] = event_name
     payload["message"] = _lifecycle_message(event_name=event_name, slug=slug, compute=compute)
@@ -486,7 +488,13 @@ def _lifecycle_payload(
         "writeup_title",
     ):
         _put_if_not_none(payload, key, record.get(key))
-    payload["discord_update_key"] = _discord_event_update_key(snapshot=payload, event_type=event_type)
+    payload["coalesce_key"] = _event_coalesce_key(snapshot=payload, event_type=event_type)
+    lease_key = _event_lease_key(payload)
+    if lease_key:
+        payload["lease_key"] = lease_key
+    if event_name in {"finished", "failed"}:
+        payload.pop("lease_expires_at", None)
+        payload.pop("lease_expired_event_type", None)
     return payload
 
 
@@ -500,21 +508,64 @@ def _is_idle_snapshot(snapshot: dict[str, object]) -> bool:
     return str(snapshot.get("phase") or "").strip().lower() == "idle"
 
 
-def run_discord_notifier_forever(
-    *,
-    artifacts_dir: Path,
-    interval_sec: int,
-    heartbeat_sec: int,
-) -> None:
-    while True:
-        try:
-            run_discord_notifier_once(
-                artifacts_dir=artifacts_dir,
-                heartbeat_sec=heartbeat_sec,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"[yellow]discord notifier cycle failed[/yellow]: {type(exc).__name__}: {exc}")
-        time.sleep(max(1, interval_sec))
+class EventDispatcher:
+    """Deliver the durable watch ledger from inside the watch process."""
+
+    def __init__(
+        self,
+        *,
+        artifacts_dir: Path,
+        interval_sec: int = DEFAULT_DISPATCH_INTERVAL_SEC,
+        heartbeat_sec: int = DEFAULT_HEARTBEAT_SEC,
+        sink: HttpEventSink | None = None,
+    ) -> None:
+        self.artifacts_dir = artifacts_dir
+        self.interval_sec = max(1, interval_sec)
+        self.heartbeat_sec = max(1, heartbeat_sec)
+        self.sink = sink or event_sink_from_env()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.sink.enabled
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="kagglebot-event-dispatcher",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def flush(self, *, force: bool = False) -> bool:
+        if not self.enabled:
+            return False
+        return dispatch_events_once(
+            artifacts_dir=self.artifacts_dir,
+            heartbeat_sec=self.heartbeat_sec,
+            force=force,
+            sink=self.sink,
+        )
+
+    def stop(self, *, flush: bool = True) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=min(5.0, float(self.interval_sec) + 1.0))
+        if flush:
+            try:
+                self.flush()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[yellow]final event flush failed[/yellow]: {type(exc).__name__}: {exc}")
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_sec):
+            try:
+                self.flush()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[yellow]event dispatcher cycle failed[/yellow]: {type(exc).__name__}: {exc}")
 
 
 def build_autopilot_status_payload(
@@ -530,18 +581,14 @@ def build_autopilot_status_payload(
     watch_state = _read_json_object(state_path)
     slug = _clean_str(watch_state.get("active_slug"))
     run_id = _clean_str(watch_state.get("active_run_id"))
-    host = socket.gethostname()
-    account = _env_first("KAGGLEBOT_DISCORD_EVENT_ACCOUNT") or DEFAULT_ACCOUNT
     if not slug or not run_id:
         return {
             "message": f"Kaggle autopilot is idle on {compute}.",
-            "host": host,
             "compute": compute,
             "state_scope": state_scope,
-            "discord_update_key": f"{_discord_update_key(account=account, state_scope=state_scope)}:idle",
+            "coalesce_key": f"{_coalesce_key(state_scope=state_scope)}:idle",
             "status": _clean_str(watch_state.get("last_status")) or "idle",
             "phase": "idle",
-            "artifact_root": str(artifacts_dir),
             "observed_at": current_time.isoformat(),
         }
 
@@ -581,6 +628,7 @@ def build_autopilot_status_payload(
     )
     explicit_phase = _clean_str(watch_state.get("phase"))
     phase = explicit_phase if status.strip().lower() in {"", "running"} and explicit_phase else resolved_phase
+    lease_key = f"{_coalesce_key(state_scope=state_scope)}:run:{run_id}"
     payload: dict[str, object] = {
         "message": _status_message(
             slug=slug,
@@ -589,18 +637,18 @@ def build_autopilot_status_payload(
             max_iterations=max_iterations,
             compute=compute,
         ),
-        "host": host,
         "compute": compute,
         "state_scope": state_scope,
         "competition": slug,
         "slug": slug,
         "run_id": run_id,
-        "discord_update_key": (f"{_discord_update_key(account=account, state_scope=state_scope)}:run:{run_id}"),
+        "coalesce_key": lease_key,
+        "lease_key": lease_key,
         "status": status,
         "phase": phase,
-        "artifact_root": str(artifacts_dir / slug),
-        "run_dir": str(run_dir),
         "observed_at": current_time.isoformat(),
+        "lease_expires_at": (current_time + timedelta(seconds=_event_lease_sec())).isoformat(),
+        "lease_expired_event_type": "autopilot.offline",
     }
     _put_if_not_none(payload, "current_iteration", current_iteration)
     _put_if_not_none(payload, "iteration", current_iteration)
@@ -739,15 +787,17 @@ def _compute_for_scope(state_scope: str) -> str:
     return "local_gpu" if state_scope in {"", "local", "local_gpu"} else state_scope
 
 
-def _discord_update_key(*, account: str, state_scope: str) -> str:
+def _coalesce_key(*, state_scope: str) -> str:
     normalized_scope = state_scope or "local_gpu"
-    return f"kaggle-autopilot:{account}:{normalized_scope}"
+    installation_id = _env_first("KAGGLEBOT_INSTALLATION_ID")
+    if installation_id:
+        return f"kaggle-autopilot:{installation_id}:{normalized_scope}"
+    return f"kaggle-autopilot:{normalized_scope}"
 
 
-def _discord_event_update_key(*, snapshot: dict[str, object], event_type: str) -> str:
-    account = _env_first("KAGGLEBOT_DISCORD_EVENT_ACCOUNT") or DEFAULT_ACCOUNT
+def _event_coalesce_key(*, snapshot: dict[str, object], event_type: str) -> str:
     state_scope = str(snapshot.get("state_scope") or "local_gpu")
-    base = _discord_update_key(account=account, state_scope=state_scope)
+    base = _coalesce_key(state_scope=state_scope)
     run_id = _clean_str(snapshot.get("run_id"))
     if not run_id:
         return f"{base}:idle"
@@ -758,6 +808,14 @@ def _discord_event_update_key(*, snapshot: dict[str, object], event_type: str) -
         iteration = _int_or_none(snapshot.get("current_iteration"))
         return f"{run_key}:iteration:{iteration if iteration is not None else 'unknown'}"
     return f"{run_key}:{event_type.rsplit('.', 1)[-1]}"
+
+
+def _event_lease_key(snapshot: dict[str, object]) -> str | None:
+    run_id = _clean_str(snapshot.get("run_id"))
+    if not run_id:
+        return None
+    state_scope = str(snapshot.get("state_scope") or "local_gpu")
+    return f"{_coalesce_key(state_scope=state_scope)}:run:{run_id}"
 
 
 def _dedupe_key(*, snapshot: dict[str, object], event_type: str, now: datetime) -> str:
@@ -1277,6 +1335,11 @@ def _float_from_keys(payload: dict[str, object], keys: tuple[str, ...]) -> float
 def _float_or_default(value: object, default: float) -> float:
     parsed = _float_or_none(value)
     return default if parsed is None else parsed
+
+
+def _event_lease_sec() -> int:
+    value = _int_or_none(_env_first("KAGGLEBOT_EVENT_LEASE_SEC"))
+    return max(DEFAULT_HEARTBEAT_SEC + 60, value or DEFAULT_LEASE_SEC)
 
 
 def _env_first(*names: str) -> str | None:
