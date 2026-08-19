@@ -553,7 +553,13 @@ class EventDispatcher:
     def stop(self, *, flush: bool = True) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=min(5.0, float(self.interval_sec) + 1.0))
+            timeout = 15.0
+            if self.sink.config is not None:
+                timeout = max(timeout, self.sink.config.timeout_sec + 1.0)
+            self._thread.join(timeout=timeout)
+            if self._thread.is_alive():
+                print("[yellow]event dispatcher is still finishing; skipped concurrent final flush[/yellow]")
+                return
         if flush:
             try:
                 self.flush()

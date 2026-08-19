@@ -365,6 +365,8 @@ def run_watch_forever(
                 continue
             if result.status in {"blocked", "failed", "skipped"}:
                 time.sleep(max(1, sleep_error_sec))
+    except KeyboardInterrupt:
+        print("[cyan]watch[/cyan]: graceful shutdown requested")
     finally:
         dispatcher.stop()
 

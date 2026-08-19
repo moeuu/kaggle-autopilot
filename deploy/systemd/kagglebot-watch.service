@@ -19,6 +19,7 @@ Restart=always
 RestartSec=60
 TimeoutStopSec=30
 KillMode=control-group
+KillSignal=SIGINT
 SuccessExitStatus=143 SIGTERM
 
 [Install]
