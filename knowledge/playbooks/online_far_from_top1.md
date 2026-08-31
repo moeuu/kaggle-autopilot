@@ -3,7 +3,7 @@
 Recommended action: Force broader model-family search, ensembling, public-LB validation, and data-source review.
 
 ## Signals
-- playground-series-s6e7 20260731T170652Z-e6cedcfd: gap=0.0036599999999999966
+- museumscat-specimen-collection-annotation-task 20260803T191248Z-c9ddc8c9: gap=0.09738
 - cuhk-x-competition-large-model-track 20260727T053217Z-5763c450: gap=0.53508
 
 ## Next Experiment
