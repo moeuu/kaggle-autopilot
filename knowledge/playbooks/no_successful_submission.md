@@ -3,6 +3,7 @@
 Recommended action: Prioritize submission-mode and artifact validation fixes before model search.
 
 ## Signals
+- playground-series-s6e8 20260831T061651Z-0e715f3e: gap=None
 - cuhk-x-competition-small-model-track 20260831T061503Z-895db5ea: gap=None
 - kaggriculture 20260831T060924Z-65329ad7: gap=None
 - autonomous-agent-prediction-beta 20260803T180718Z-e82efebb: gap=None
@@ -12,7 +13,6 @@ Recommended action: Prioritize submission-mode and artifact validation fixes bef
 - titanic 20260731T130322Z-d4abf336: gap=None
 - cuhk-x-competition-small-model-track 20260729T200030Z-80a318fb: gap=None
 - skill-lift 20260729T184654Z-87ab425c: gap=None
-- autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: gap=None
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

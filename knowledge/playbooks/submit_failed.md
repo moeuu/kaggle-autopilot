@@ -5,6 +5,7 @@ Recommended action: Improve submit fallback diagnostics, notebook/file mode infe
 ## Signals
 - museumscat-specimen-collection-annotation-task 20260803T191248Z-c9ddc8c9: gap=0.09738
 - cuhk-x-competition-large-model-track 20260727T053217Z-5763c450: gap=0.53508
+- playground-series-s6e8 20260831T061651Z-0e715f3e: reason=OracleStrategyError fingerprint=fd3dddf7ddd6d7fe392b
 - cuhk-x-competition-small-model-track 20260831T061503Z-895db5ea: reason=OracleStrategyError fingerprint=d47dca38b1550fbcb1bd
 - kaggriculture 20260831T060924Z-65329ad7: reason=OracleStrategyError fingerprint=c44f6fd1d93bc3519c5e
 - cuhk-x-competition-small-model-track 20260803T170033Z-e983c0ce: reason=missing_competition_data fingerprint=a076e59a55142aa47dab
