@@ -5,10 +5,10 @@ Recommended action: Tighten metric contract validation and fail earlier when sco
 ## Signals
 - museumscat-specimen-collection-annotation-task 20260803T191248Z-c9ddc8c9: gap=0.09738
 - soccer-feature-engineering-hackathon 20260719T100737Z-031b686d: gap=None
+- cuhk-x-competition-small-model-track 20260831T061503Z-895db5ea: reason=OracleStrategyError fingerprint=d47dca38b1550fbcb1bd
 - kaggriculture 20260831T060924Z-65329ad7: reason=OracleStrategyError fingerprint=c44f6fd1d93bc3519c5e
 - autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: reason=OracleStrategyError fingerprint=a63a761b94b857bf966a
 - cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: reason=KaggleBotError fingerprint=e3780906cedd3cd49430
-- filament-segmentation-2026 20260716T032330Z-5b754aa5: reason=submit_aborted fingerprint=e69185e5bed70e4bac2c
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

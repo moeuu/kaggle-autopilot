@@ -5,6 +5,7 @@ Recommended action: Add cheaper smoke tests and resource-aware model schedules b
 ## Signals
 - museumscat-specimen-collection-annotation-task 20260803T191248Z-c9ddc8c9: gap=0.09738
 - soccer-feature-engineering-hackathon 20260719T100737Z-031b686d: gap=None
+- cuhk-x-competition-small-model-track 20260831T061503Z-895db5ea: reason=OracleStrategyError fingerprint=d47dca38b1550fbcb1bd
 - kaggriculture 20260831T060924Z-65329ad7: reason=OracleStrategyError fingerprint=c44f6fd1d93bc3519c5e
 - autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: reason=OracleStrategyError fingerprint=a63a761b94b857bf966a
 
