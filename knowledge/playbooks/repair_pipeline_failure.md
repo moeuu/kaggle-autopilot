@@ -3,6 +3,7 @@
 Recommended action: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
 
 ## Signals
+- biohub-cell-tracking-during-development 20260918T034618Z-f339cb2e: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - arc-prize-2026-arc-agi-3 20260918T025926Z-ae124719: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - arc-prize-2026-arc-agi-2 20260918T024243Z-339c9274: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - kaggriculture 20260918T022434Z-4799081d: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
@@ -12,7 +13,6 @@ Recommended action: Harden Oracle/Codex verification and source reload so verifi
 - autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: reason=OracleStrategyError fingerprint=a63a761b94b857bf966a
 - playground-series-s6e7 20260727T121034Z-a02d37d5: reason=RuntimeError fingerprint=92217d94e261b01df814
 - cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: reason=KaggleBotError fingerprint=e3780906cedd3cd49430
-- playground-series-s6e7 20260719T155759Z-ddb4b9f1: reason=RuntimeError fingerprint=92217d94e261b01df814
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
