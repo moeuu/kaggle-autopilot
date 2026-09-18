@@ -8,7 +8,6 @@ Recommended action: Promote pre-run discovery/profile failures into typed autofi
 - playground-series-s6e7 20260727T121034Z-a02d37d5: reason=RuntimeError fingerprint=92217d94e261b01df814
 - None None: reason=KaggleCliError fingerprint=cba6662e9b2e00191cee
 - None None: reason=KaggleCliError fingerprint=cba6662e9b2e00191cee
-- autonomous-agent-prediction-beta 20260719T171322Z-21ec36c9: reason=stale_watch_state fingerprint=e44bf52e9df39debfccc
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

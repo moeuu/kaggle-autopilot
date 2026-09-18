@@ -3,6 +3,7 @@
 Recommended action: Harden kernel runtime so every run emits metrics.json and diagnostics.md.
 
 ## Signals
+- umud-challenge-muscle-architecture-in-ultrasound-data 20260918T050142Z-0cb422c8: gap=None
 - 3rd-wear-dataset-challenge-hasca-2026 20260918T044235Z-869dbb11: gap=None
 - biohub-cell-tracking-during-development 20260918T034618Z-f339cb2e: gap=None
 - arc-prize-2026-arc-agi-3 20260918T025926Z-ae124719: gap=None
@@ -12,7 +13,6 @@ Recommended action: Harden kernel runtime so every run emits metrics.json and di
 - playground-series-s6e8 20260831T061651Z-0e715f3e: gap=None
 - cuhk-x-competition-small-model-track 20260831T061503Z-895db5ea: gap=None
 - kaggriculture 20260831T060924Z-65329ad7: gap=None
-- autonomous-agent-prediction-beta 20260803T180718Z-e82efebb: gap=None
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
