@@ -2,7 +2,7 @@
 
 - skill_id: `submit_failure_recovery`
 - status: `candidate`
-- version: `698`
+- version: `699`
 - problem_types: submission, guardrails
 - tags: submit_failed, self_improvement
 
