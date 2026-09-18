@@ -3,6 +3,7 @@
 Recommended action: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
 
 ## Signals
+- house-prices-advanced-regression-techniques 20260918T062304Z-2bea5965: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - titanic 20260918T060759Z-52958500: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - llm-classification-finetuning 20260918T055145Z-8e1b4099: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - spaceship-titanic 20260918T053312Z-aca28cd1: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
@@ -12,7 +13,6 @@ Recommended action: Harden Oracle/Codex verification and source reload so verifi
 - biohub-cell-tracking-during-development 20260918T034618Z-f339cb2e: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - arc-prize-2026-arc-agi-3 20260918T025926Z-ae124719: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - arc-prize-2026-arc-agi-2 20260918T024243Z-339c9274: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
-- kaggriculture 20260918T022434Z-4799081d: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

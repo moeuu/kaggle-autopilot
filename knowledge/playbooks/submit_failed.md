@@ -9,7 +9,6 @@ Recommended action: Improve submit fallback diagnostics, notebook/file mode infe
 - cuhk-x-competition-small-model-track 20260831T061503Z-895db5ea: reason=OracleStrategyError fingerprint=d47dca38b1550fbcb1bd
 - kaggriculture 20260831T060924Z-65329ad7: reason=OracleStrategyError fingerprint=c44f6fd1d93bc3519c5e
 - cuhk-x-competition-small-model-track 20260803T170033Z-e983c0ce: reason=missing_competition_data fingerprint=a076e59a55142aa47dab
-- autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: reason=OracleStrategyError fingerprint=a63a761b94b857bf966a
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

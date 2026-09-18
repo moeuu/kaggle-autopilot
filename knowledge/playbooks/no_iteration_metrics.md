@@ -3,6 +3,7 @@
 Recommended action: Harden kernel runtime so every run emits metrics.json and diagnostics.md.
 
 ## Signals
+- house-prices-advanced-regression-techniques 20260918T062304Z-2bea5965: gap=None
 - titanic 20260918T060759Z-52958500: gap=None
 - llm-classification-finetuning 20260918T055145Z-8e1b4099: gap=None
 - spaceship-titanic 20260918T053312Z-aca28cd1: gap=None
@@ -12,7 +13,6 @@ Recommended action: Harden kernel runtime so every run emits metrics.json and di
 - biohub-cell-tracking-during-development 20260918T034618Z-f339cb2e: gap=None
 - arc-prize-2026-arc-agi-3 20260918T025926Z-ae124719: gap=None
 - arc-prize-2026-arc-agi-2 20260918T024243Z-339c9274: gap=None
-- kaggriculture 20260918T022434Z-4799081d: gap=None
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
