@@ -3,6 +3,7 @@
 Recommended action: Prioritize submission-mode and artifact validation fixes before model search.
 
 ## Signals
+- 3rd-wear-dataset-challenge-hasca-2026 20260918T044235Z-869dbb11: gap=None
 - biohub-cell-tracking-during-development 20260918T034618Z-f339cb2e: gap=None
 - arc-prize-2026-arc-agi-3 20260918T025926Z-ae124719: gap=None
 - arc-prize-2026-arc-agi-2 20260918T024243Z-339c9274: gap=None
@@ -12,7 +13,6 @@ Recommended action: Prioritize submission-mode and artifact validation fixes bef
 - cuhk-x-competition-small-model-track 20260831T061503Z-895db5ea: gap=None
 - kaggriculture 20260831T060924Z-65329ad7: gap=None
 - autonomous-agent-prediction-beta 20260803T180718Z-e82efebb: gap=None
-- cuhk-x-competition-small-model-track 20260803T170033Z-e983c0ce: gap=None
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
