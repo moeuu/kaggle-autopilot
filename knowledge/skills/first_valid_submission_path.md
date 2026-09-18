@@ -2,7 +2,7 @@
 
 - skill_id: `first_valid_submission_path`
 - status: `candidate`
-- version: `888`
+- version: `889`
 - problem_types: submission, validation
 - tags: no_successful_submission, self_improvement
 
