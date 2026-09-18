@@ -4,7 +4,6 @@ Recommended action: Force broader model-family search, ensembling, public-LB val
 
 ## Signals
 - museumscat-specimen-collection-annotation-task 20260803T191248Z-c9ddc8c9: gap=0.09738
-- cuhk-x-competition-large-model-track 20260727T053217Z-5763c450: gap=0.53508
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

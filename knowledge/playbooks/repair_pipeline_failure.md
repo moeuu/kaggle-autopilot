@@ -3,6 +3,7 @@
 Recommended action: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
 
 ## Signals
+- filament-segmentation-2026 20260918T052020Z-412fefee: reason=OracleStrategyError fingerprint=7b5c76fafe9d12ec172e
 - umud-challenge-muscle-architecture-in-ultrasound-data 20260918T050142Z-0cb422c8: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - 3rd-wear-dataset-challenge-hasca-2026 20260918T044235Z-869dbb11: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
 - biohub-cell-tracking-during-development 20260918T034618Z-f339cb2e: reason=OracleStrategyError fingerprint=97ba42b8116635bddbb7
@@ -12,7 +13,6 @@ Recommended action: Harden Oracle/Codex verification and source reload so verifi
 - playground-series-s6e8 20260831T061651Z-0e715f3e: reason=OracleStrategyError fingerprint=fd3dddf7ddd6d7fe392b
 - cuhk-x-competition-small-model-track 20260831T061503Z-895db5ea: reason=OracleStrategyError fingerprint=d47dca38b1550fbcb1bd
 - kaggriculture 20260831T060924Z-65329ad7: reason=OracleStrategyError fingerprint=c44f6fd1d93bc3519c5e
-- autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: reason=OracleStrategyError fingerprint=a63a761b94b857bf966a
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
