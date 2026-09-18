@@ -2,7 +2,7 @@
 
 - skill_id: `metric_validation_contract_repair`
 - status: `candidate`
-- version: `1296`
+- version: `1297`
 - problem_types: metric, validation
 - tags: metric_or_validation_error, self_improvement
 
