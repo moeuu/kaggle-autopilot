@@ -3,6 +3,7 @@
 Recommended action: Harden kernel runtime so every run emits metrics.json and diagnostics.md.
 
 ## Signals
+- titanic 20260918T060759Z-52958500: gap=None
 - llm-classification-finetuning 20260918T055145Z-8e1b4099: gap=None
 - spaceship-titanic 20260918T053312Z-aca28cd1: gap=None
 - filament-segmentation-2026 20260918T052020Z-412fefee: gap=None
@@ -12,7 +13,6 @@ Recommended action: Harden kernel runtime so every run emits metrics.json and di
 - arc-prize-2026-arc-agi-3 20260918T025926Z-ae124719: gap=None
 - arc-prize-2026-arc-agi-2 20260918T024243Z-339c9274: gap=None
 - kaggriculture 20260918T022434Z-4799081d: gap=None
-- arc-prize-2026-arc-agi-2 20260831T062244Z-9623e205: gap=None
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

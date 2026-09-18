@@ -5,7 +5,6 @@ Recommended action: Promote pre-run discovery/profile failures into typed autofi
 ## Signals
 - None None: reason=KaggleCliError fingerprint=cba6662e9b2e00191cee
 - museumscat-specimen-collection-annotation-task 20260727T132941Z-e6928de5: reason=stale_watch_state fingerprint=e44bf52e9df39debfccc
-- playground-series-s6e7 20260727T121034Z-a02d37d5: reason=RuntimeError fingerprint=92217d94e261b01df814
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
