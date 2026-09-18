@@ -2,7 +2,7 @@
 
 - skill_id: `resource_capacity_fallback`
 - status: `candidate`
-- version: `809`
+- version: `811`
 - problem_types: runtime, resource
 - tags: resource_or_capacity, self_improvement
 
