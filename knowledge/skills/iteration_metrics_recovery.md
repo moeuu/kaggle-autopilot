@@ -2,7 +2,7 @@
 
 - skill_id: `iteration_metrics_recovery`
 - status: `candidate`
-- version: `1118`
+- version: `1119`
 - problem_types: runtime, metrics
 - tags: no_iteration_metrics, self_improvement
 
