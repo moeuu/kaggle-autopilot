@@ -6,7 +6,6 @@ Recommended action: Classify supervisor/runtime errors centrally and add reusabl
 - arc-prize-2026-arc-agi-2 20260831T062244Z-9623e205: reason=stale_watch_state fingerprint=e44bf52e9df39debfccc
 - museumscat-specimen-collection-annotation-task 20260803T191248Z-c9ddc8c9: reason=stale_watch_state fingerprint=e44bf52e9df39debfccc
 - autonomous-agent-prediction-beta 20260803T180718Z-e82efebb: reason=training_data_detection_error fingerprint=d6ca998851993ecbdd93
-- cuhk-x-competition-small-model-track 20260719T030527Z-69497fe0: reason=KaggleCliError fingerprint=5ec60cecf216ae30aaf0
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
