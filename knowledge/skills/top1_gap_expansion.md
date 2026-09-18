@@ -2,7 +2,7 @@
 
 - skill_id: `top1_gap_expansion`
 - status: `candidate`
-- version: `650`
+- version: `651`
 - problem_types: model_search, leaderboard
 - tags: online_far_from_top1, self_improvement
 
