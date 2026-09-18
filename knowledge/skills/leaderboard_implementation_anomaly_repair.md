@@ -2,7 +2,7 @@
 
 - skill_id: `leaderboard_implementation_anomaly_repair`
 - status: `candidate`
-- version: `954`
+- version: `955`
 - problem_types: submission, runtime_fidelity, leaderboard
 - tags: leaderboard_implementation_anomaly, self_improvement
 
